@@ -18,7 +18,8 @@ import {
   presetOptionsI18n, presetProviderLabel,
   normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel,
   groupModelsForSelector, selectorMainLabel, selectorSubLabel,
-  reasoningEffortTiersForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
+  reasoningEffortTiersForModel, reasoningEffortForModelSwitch, defaultReasoningEffortForModel, normalizeStoredReasoningEffort,
+  localProbeTiersForKind, baseUrlUsesLocalOrPrivate,
 } from './model-catalog.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import {
@@ -528,7 +529,33 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
       const effectiveId = currentSessionModelId || activeModelId;
       const current = savedModels.find(m => m.id === effectiveId);
-      const reasoningEffortTiers = current ? (reasoningEffortTiersForModel(current) || []) : [];
+      const [currentProbedKind, setCurrentProbedKind] = useState(null);
+      const [currentProbePending, setCurrentProbePending] = useState(false);
+      // 本地/私网 openai_compatible 端点：探测服务类型，按探测结果下发真实档位
+      // （vllm→四档、ollama→off/high、lmstudio/generic→不支持提示）。
+      const isLocalCompatible = current && current.preset === 'openai_compatible' && baseUrlUsesLocalOrPrivate(current.base_url || '');
+      useEffect(() => {
+        if (!isLocalCompatible) {
+          setCurrentProbedKind(null);
+          setCurrentProbePending(false);
+          return;
+        }
+        let cancelled = false;
+        setCurrentProbePending(true);
+        setCurrentProbedKind(null);
+        if (bridge.available && bridge.models && bridge.models.probeLocalServerKind) {
+          bridge.models.probeLocalServerKind(current.base_url)
+            .then((kind) => { if (!cancelled) setCurrentProbedKind(kind || 'generic'); })
+            .catch(() => { if (!cancelled) setCurrentProbedKind('generic'); })
+            .finally(() => { if (!cancelled) setCurrentProbePending(false); });
+        } else {
+          if (!cancelled) setCurrentProbePending(false);
+        }
+        return () => { cancelled = true; };
+      }, [isLocalCompatible, current && current.base_url]);
+      const reasoningEffortTiers = isLocalCompatible
+        ? (currentProbePending ? [] : (localProbeTiersForKind(currentProbedKind) || []))
+        : (current ? (reasoningEffortTiersForModel(current) || []) : []);
       // 存量档位（可能保存过底座归一前的旧值，如 deepseek 的 medium）先归一到
       // 档位表内等价档位再高亮，避免「档位表不含该值 → 下拉无高亮」。
       const reasoningEffortValue = current ? normalizeStoredReasoningEffort(current, current.reasoning_effort) : null;
@@ -606,23 +633,31 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                     </>
                   );
                 })()}
-                {current && reasoningEffortTiers.length > 0 && (
+                {current && (reasoningEffortTiers.length > 0 || isLocalCompatible) && (
                   <>
                     <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
                     <div className="px-3 pt-1 pb-1">
                       <div className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 mb-1.5">{t.thinkingDepth}</div>
-                      <div className="flex flex-wrap gap-1">
-                        {reasoningEffortTiers.map(tier => (
-                          <button key={tier} onClick={() => setReasoningEffortForCurrent(tier)}
-                            className={`h-7 min-w-[48px] px-2.5 rounded-full text-[12px] font-medium transition-colors ${
-                              reasoningEffortValue === tier
-                                ? 'bg-[#007AFF] text-white'
-                                : 'bg-black/[0.05] dark:bg-white/[0.08] text-gray-600 dark:text-gray-300 hover:bg-black/[0.09] dark:hover:bg-white/[0.13]'
-                            }`}>
-                            {t.thinkingDepthTiers[tier] || tier}
-                          </button>
-                        ))}
-                      </div>
+                      {reasoningEffortTiers.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {reasoningEffortTiers.map(tier => (
+                            <button key={tier} onClick={() => setReasoningEffortForCurrent(tier)}
+                              className={`h-7 min-w-[48px] px-2.5 rounded-full text-[12px] font-medium transition-colors ${
+                                reasoningEffortValue === tier
+                                  ? 'bg-[#007AFF] text-white'
+                                  : 'bg-black/[0.05] dark:bg-white/[0.08] text-gray-600 dark:text-gray-300 hover:bg-black/[0.09] dark:hover:bg-white/[0.13]'
+                              }`}>
+                              {t.thinkingDepthTiers[tier] || tier}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className={`text-[11px] leading-4 ${currentProbePending ? 'text-gray-400 dark:text-gray-500' : 'text-[#FF9500] dark:text-[#FFB340]'}`}>
+                          {currentProbePending
+                            ? ((t.uiSettingsDetail && t.uiSettingsDetail.reasoningProbePending) || '正在探测服务类型…')
+                            : ((t.uiSettingsDetail && t.uiSettingsDetail.reasoningProbeUnsupported) || '该端点不支持思考档位调节')}
+                        </div>
+                      )}
                       {effortSaveError && (
                         <div className="mt-1.5 text-[11px] leading-4 text-[#FF3B30] dark:text-[#FF6B6B]">{effortSaveError}</div>
                       )}
@@ -1340,7 +1375,35 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         : null;
       const isCodingPlan = providerKind === PROVIDER_KIND_CODING_PLAN || (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN);
       // 当前表单模型可切换的思考深度档位（底座不支持的模型为空 = 不提供切换）。
-      const reasoningEffortTiers = reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || [];
+      // 本地/私网 openai_compatible 端点：按 Rust 探测结果下发真实档位
+      // （vllm→四档、ollama→off/high、lmstudio/generic→不支持），避免 UI
+      // 显示档位但 wire 层空操作的「调了个寂寞」。
+      const [probedKind, setProbedKind] = useState(null);
+      const [probePending, setProbePending] = useState(false);
+      const isLocalCompatible = preset === 'openai_compatible' && baseUrlUsesLocalOrPrivate(baseUrl.trim());
+      useEffect(() => {
+        if (!isLocalCompatible) {
+          setProbedKind(null);
+          setProbePending(false);
+          return;
+        }
+        let cancelled = false;
+        setProbePending(true);
+        setProbedKind(null);
+        if (bridge.available && bridge.models && bridge.models.probeLocalServerKind) {
+          bridge.models.probeLocalServerKind(baseUrl.trim())
+            .then((kind) => { if (!cancelled) setProbedKind(kind || 'generic'); })
+            .catch(() => { if (!cancelled) setProbedKind('generic'); })
+            .finally(() => { if (!cancelled) setProbePending(false); });
+        } else {
+          // web 预览无探测能力：保持默认四档（与旧行为一致），不误报不支持。
+          if (!cancelled) setProbePending(false);
+        }
+        return () => { cancelled = true; };
+      }, [isLocalCompatible, baseUrl]);
+      const reasoningEffortTiers = isLocalCompatible
+        ? (probePending ? [] : (localProbeTiersForKind(probedKind) || []))
+        : (reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || []);
       function normalizeConnectionTestResult(value, isCodingPlanProvider) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
           const code = String(value.code || (value.ok ? 'ok' : 'unknown'));
@@ -2193,25 +2256,33 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                 </section>
               )}
               {renderImageInputSection()}
-              {showConfigFields && reasoningEffortTiers.length > 0 && (
+              {(showConfigFields && (reasoningEffortTiers.length > 0 || isLocalCompatible)) && (
                 <section>
                   <div className={formGroup}>
                     <div className="min-h-[54px] flex items-center gap-3 px-4 py-2.5">
                       <span className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.reasoningEffort}</span>
-                      <div className="ml-auto flex flex-wrap justify-end gap-1">
-                        {reasoningEffortTiers.map(tier => (
-                          <button
-                            key={tier}
-                            type="button"
-                            onClick={() => setReasoningEffort(tier)}
-                            className={`h-7 min-w-[52px] px-3 rounded-full text-[13px] font-medium transition-colors ${
-                              reasoningEffort === tier
-                                ? 'bg-[#007AFF] text-white dark:bg-[#0A84FF]'
-                                : 'bg-[#E5E5EA] text-[#636366] hover:bg-[#D9D9DE] dark:bg-white/[0.07] dark:text-[#C7C7CC] dark:hover:bg-white/[0.12]'
-                            }`}
-                          >{settingsCopy.reasoningEffortTiers[tier] || tier}</button>
-                        ))}
-                      </div>
+                      {reasoningEffortTiers.length > 0 ? (
+                        <div className="ml-auto flex flex-wrap justify-end gap-1">
+                          {reasoningEffortTiers.map(tier => (
+                            <button
+                              key={tier}
+                              type="button"
+                              onClick={() => setReasoningEffort(tier)}
+                              className={`h-7 min-w-[52px] px-3 rounded-full text-[13px] font-medium transition-colors ${
+                                reasoningEffort === tier
+                                  ? 'bg-[#007AFF] text-white dark:bg-[#0A84FF]'
+                                  : 'bg-[#E5E5EA] text-[#636366] hover:bg-[#D9D9DE] dark:bg-white/[0.07] dark:text-[#C7C7CC] dark:hover:bg-white/[0.12]'
+                              }`}
+                            >{settingsCopy.reasoningEffortTiers[tier] || tier}</button>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className={`ml-auto text-right text-[12px] leading-4 ${probePending ? 'text-[#8A8A8E] dark:text-[#98989D]' : 'text-[#FF9500] dark:text-[#FFB340]'}`}>
+                          {probePending
+                            ? (settingsCopy.reasoningProbePending || '正在探测服务类型…')
+                            : (settingsCopy.reasoningProbeUnsupported || '该端点不支持思考档位调节')}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </section>
