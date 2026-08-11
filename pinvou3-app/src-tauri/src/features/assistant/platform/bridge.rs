@@ -2894,8 +2894,68 @@ mod tests {
             })
         );
         assert_eq!(
-            config.compaction.token_threshold, 56_570,
-            "未知远端 OpenAI-compatible alias 应沿用底座 8K 保守输出预留"
+            config.compaction.token_threshold, 45_648,
+            "未知远端 OpenAI-compatible alias 应走底座窗口启发式：声明 output 24576 生效（E=131072-24576-1024），不再被 8K 保守兜底压死"
+        );
+    }
+
+    /// PR #210 语义守护：云端模型(已登记 deepseek-v4-pro / 未登记 openai-compatible)
+    /// 不得被品悟声明 output_tokens——输出上限由底座兜底(provider_capability fallback
+    /// 已对齐底座最大请求上限 64K)。只有本地 vLLM 走 is_local_vllm 分支显式携带 24K。
+    #[test]
+    fn forkguard_cloud_models_defer_output_cap_to_base() {
+        let (_lock, _env) =
+            locked_env(&["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"]);
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS");
+
+        // A. 云端已登记模型(deepseek-v4-pro)：声明窗口,不声明输出上限
+        let mut a = fixture_bridge();
+        set_active_model(
+            &mut a,
+            ModelPreset::Deepseek,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com/",
+            "k",
+        );
+        let limits_a = a
+            .route_limits_for_model(&a.model())
+            .expect("cloud route limits");
+        assert_eq!(
+            limits_a.output_tokens, None,
+            "云端已登记模型不得声明 output_tokens"
+        );
+
+        // B. 云端未登记 openai-compatible 模型：无已知 route facts → None,全权交由底座
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "totally-unregistered-cloud-model",
+            "https://example.com/v1",
+            "k",
+        );
+        assert!(
+            b.route_limits_for_model(&b.model()).is_none(),
+            "云端未登记模型必须返回 None(无 context/output 事实),不得夹带旧 24K 语义"
+        );
+
+        // C. 底座兜底：未登记模型走 128K 默认窗口的窗口启发式 →
+        //    requested_cap = 128000/2 = 64000(≥500K 才 64K),input ceiling =
+        //    128000 - 64000 - 1024(底座 headroom)= 62976。
+        //    若底座 provider_capability fallback 仍是保守 4096,ceiling 会是
+        //    128000-4096-1024=122880,此处即失败——守护"未登记模型对齐窗口启发式"的底座行为。
+        let provider = b.build_dt_config().api_provider();
+        let budget = deepseek_tui::core::engine::context_input_budget_for_route(
+            provider,
+            &b.model(),
+            None,
+            0,
+        )
+        .expect("unregistered cloud route must yield a budget");
+        assert_eq!(
+            budget, 62_976,
+            "未登记云端模型输出兜底 64K 窗口启发式,ceiling=128000-64000-1024"
         );
     }
 

@@ -1,15 +1,15 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-08-11（公开维护基线：上游 `v0.9.5` + 5 个 Pinvou 主题）
+> 最后更新：2026-08-11（公开维护基线：上游 `v0.9.5` + 5 个 Pinvou 主题 + 1 个输出上限 drift commit）
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 > English: [`docs/fork-policy.en.md`](fork-policy.en.md)
 
 ## 0. 当前基线
 
 - 上游：`Hmbown/CodeWhale` tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c`。
-- 公开维护分支：`Pinvou/CodeWhale:pinvou3-clean`，head `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd`。
+- 公开维护分支：`Pinvou/CodeWhale:pinvou3-clean`，head `1aff9dd7387dbdb26acde8bf8d2ab24abc712683`（= 7 个主题线性提交之上再叠 1 个输出上限 drift commit，见 `docs/fork-modifications.md`）。
 - 升级前基线 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` 同时保留在 tag `pinvou-v0.9.0-r4` 和 branch `backup/pinvou3-clean-v0.9.0-r4`。
-- `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 均公开可达，并与父仓 gitlink 指向同一 commit；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签。
+- `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r6` 均公开可达，并与父仓 gitlink 指向同一 commit；`r1`/`r2`/`r3`/`r4`/`r5` 保留为不可变历史标签。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
 - 当前只维护 5 个长期主题：
 
@@ -40,7 +40,7 @@ Pinvou 的产品工具白名单、UI、工作区选择和业务策略留在 app�
 - 总 drift 软上限：1500 行。
 - 单文件 fork-distinct 改动软上限：200 行。
 - 超过不是自动拒绝，但必须记录保留原因和减量顺序。
-- 当前相对 `v0.9.5` 为 `+2177/-269，48 文件`。净增量约 1908 行，修改面超过总变更软线，主要集中在 Automation 持久化、三省六部完成闸与结构化产出安全，以及会话恢复生命周期；继续拆到 app 会复制底座状态机，因此本轮保留，后续优先上游化通用宿主接口、会话快照/恢复 API 和 Automation 生命周期修复。
+- 当前相对 `v0.9.5` 为 `+2190/-271，49 文件`。净增量约 1919 行，修改面超过总变更软线，主要集中在 Automation 持久化、三省六部完成闸与结构化产出安全，以及会话恢复生命周期；继续拆到 app 会复制底座状态机，因此本轮保留，后续优先上游化通用宿主接口、会话快照/恢复 API 和 Automation 生命周期修复。
 
 ### 1.3 主题提交
 

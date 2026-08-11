@@ -1,18 +1,18 @@
 # CodeWhale Fork Modification Register
 
-> Updated: 2026-08-11. Canonical Chinese register: [`docs/fork-modifications.md`](fork-modifications.md).
+> Updated: 2026-08-13. Canonical Chinese register: [`docs/fork-modifications.md`](fork-modifications.md).
 
 ## Current baseline
 
 | Item | Value |
 |---|---|
 | Upstream | `v0.9.5` at `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| Public maintenance branch | `Pinvou/CodeWhale:pinvou3-clean` at `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| Merged fixes | `Pinvou/CodeWhale#9` and `Pinvou/CodeWhale#11` are merged; the current maintenance head is `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| Public status | `pinvou3-clean` and immutable tag `pinvou-v0.9.5-r5` both resolve to the public maintenance head; `r1` through `r4` remain immutable historical tags |
+| Public maintenance branch | `Pinvou/CodeWhale:pinvou3-clean` at `1aff9dd7387dbdb26acde8bf8d2ab24abc712683` |
+| Merged fixes | `Pinvou/CodeWhale#9` and `Pinvou/CodeWhale#11` are merged; `Pinvou/CodeWhale#8` (output cap) is pending, and its rebased head `1aff9dd7387dbdb26acde8bf8d2ab24abc712683` is this PR's gitlink target |
+| Public status | `pinvou3-clean` and immutable tag `pinvou-v0.9.5-r6` both resolve to the public maintenance head; `r1` through `r5` remain immutable historical tags |
 | Previous baseline backup | Tag `pinvou-v0.9.0-r4` and branch `backup/pinvou3-clean-v0.9.0-r4`, both at `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| Drift | 48 files, `+2177/-269` |
-| Organization | Five long-lived topics in seven linear commits replayed from `v0.9.5` |
+| Drift | 49 files, `+2190/-271` |
+| Organization | Five long-lived topics in seven linear commits replayed from `v0.9.5`, plus one output-cap drift commit (8 linear commits total) |
 
 ### Published session fix
 
@@ -22,6 +22,21 @@
 - Revision reconciliation remains fail-closed only for genuine cross-client turns. A local `chat:done` immediately releases the next send, readback failures cannot block ordinary local chat, and cross-client pending notices are deduplicated per session.
 - Two CodeWhale tests, two parent `forkguard_*` tests, and Tauri/Web frontend behavior coverage protect side-effect-free runtime reads, observable and idempotent explicit recovery, safe secondary Store opening, durable startup recovery, and consecutive sends after local completion.
 - The fix is included in the published head, drift figures, and immutable tag `pinvou-v0.9.5-r5`; CodeWhale required checks and parent automation pass.
+
+### Output-cap drift (PR #216)
+
+> **2026-08-13 (PR #216 rebased onto v0.9.5)**: the gitlink points at the new
+> fork commit on top of `2eceab4e` (`fix(config): align unregistered
+> openai-compatible output cap with the base window heuristic`, carrying the
+> intent of CodeWhale PR #8). v0.9.5 changed `provider_capability.max_output`
+> to `Option` (unknown models return `None`), so the original PR #8
+> `unwrap_or(65536)` no longer applies; its intent (unregistered
+> openai-compatible models must not be crushed by the conservative 4096/8192
+> fallback) is implemented by adding `ApiProvider::Openai` to the
+> `route_declares_unknown_output_ceiling` allowlist: custom OpenAI-compatible
+> endpoints are treated as operator-owned and unregistered aliases follow the
+> window heuristic (128K → 64000), matching registered models. Fork-distinct
+> behavior, registered here with the guard tests.
 
 ## Topics
 

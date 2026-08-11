@@ -4,17 +4,17 @@
 > 基线、主题边界、守护指纹和同步结论以本文与 `docs/fork-policy.md` 为准。
 > English: [`docs/fork-modifications.en.md`](fork-modifications.en.md)
 
-## 0. 当前状态（2026-08-11 · v0.9.5 r5 公开基线）
+## 0. 当前状态（2026-08-13 · v0.9.5 r6 公开基线）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| 公开维护分支 | `Pinvou/CodeWhale:pinvou3-clean`，head `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11` 已合并；当前维护分支 head 为 `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 均指向公开维护分支 head；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签 |
+| 公开维护分支 | `Pinvou/CodeWhale:pinvou3-clean`，head `1aff9dd7387dbdb26acde8bf8d2ab24abc712683` |
+| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11` 已合并；`Pinvou/CodeWhale#8`（输出上限）待合并，其 rebase 后 head `1aff9dd7387dbdb26acde8bf8d2ab24abc712683` 为本 PR gitlink 目标 |
+| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r6` 均指向公开维护分支 head；`r1`/`r2`/`r3`/`r4`/`r5` 保留为不可变历史标签 |
 | 旧基线备份 | tag `pinvou-v0.9.0-r4` + branch `backup/pinvou3-clean-v0.9.0-r4`，均指向 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题、7 个线性提交 |
-| drift | `48 files changed, +2177/-269`；净增约 1908 行 |
+| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题、8 个线性提交（7 个主题提交 + 1 个输出上限 drift commit） |
+| drift | `49 files changed, +2190/-271`；净增约 1919 行 |
 | 守护 | 23 条 CodeWhale `forkguard_*` 行为测试 + 父仓指纹/行为测试 |
 | 父仓适配 | gitlink、`Cargo.lock`、`EngineConfig` v0.9.5 字段适配 |
 
@@ -26,6 +26,18 @@
 - 前端仅对真正的跨端回合保留 revision 对账门禁；本地 `chat:done` 直接释放下一轮发送，落盘读回异常不得阻塞普通本地对话，跨端未收敛提示按会话去重。
 - 本次新增 2 条 CodeWhale `forkguard_*`、2 条父仓 `forkguard_*` 和 Tauri/Web 前端行为回归，分别锁定运行时无副作用读取、显式恢复可观测与幂等、二次 Store 打开安全、启动恢复落盘以及本地完成后连续发送。
 - 本节改动已计入上方公开维护分支 head、drift 和固定标签 `pinvou-v0.9.5-r5`；CodeWhale required checks 与父仓自动测试均已通过。
+
+### 输出上限 drift（PR #216）
+
+> **2026-08-13 更新（PR #216 结合 v0.9.5 rebase）**：gitlink 指向
+> `2eceab4e` 之上的新增 fork commit（`fix(config): 未登记 openai-compatible
+> 输出上限对齐底座窗口启发式`，承 CodeWhale PR #8 意图）。v0.9.5 已把
+> `provider_capability.max_output` 改为 `Option` 且未登记返回 `None`，原 PR #8
+> 的 `unwrap_or(65536)` 写法不再适用；其意图（未登记 openai-compatible 不被
+> 4096/8192 保守兜底压死）经 `route_declares_unknown_output_ceiling` 白名单
+> 纳入 `ApiProvider::Openai` 实现：自定义 openai-compatible 端点视为
+> operator-owned，未登记 alias 走窗口启发式（128K → 64000），与已登记模型
+> 行为一致。fork-distinct 行为，同步登记 drift 与守护测试。
 
 ### 软上限评估
 
