@@ -93,8 +93,10 @@
   }
   async function equipPersona(personaId) {
     if (!state.activeSessionId) {
-      await ensureSession(); // 草稿态加卡 → 先物化 session(lazy session)
-      if (!state.activeSessionId) return; // 物化失败,放弃
+      // 草稿态加卡 → 先物化 session(lazy session)。用返回值判空：切走场景
+      // ensureSession 返回 null 但 activeSessionId 非空，会把卡加进新会话。
+      var materialized = await ensureSession();
+      if (!materialized) return; // 物化失败/切走,放弃
     }
     var prev = state.activePersona; // 换卡前的旧专家(同 session 切换时先播报卸下)
     try {

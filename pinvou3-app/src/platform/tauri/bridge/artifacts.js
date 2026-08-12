@@ -141,7 +141,15 @@
 
   async function addDroppedFileAttachment(file) {
     if (!file) return;
-    if (!state.activeSessionId && ensureSession) await ensureSession();
+    if (!state.activeSessionId && ensureSession) {
+      // 草稿态拖文件 → 先物化 session。用返回值判空：切走场景 ensureSession
+      // 返回 null 但 activeSessionId 非空，附件会落进用户新切到的会话。
+      var materialized = await ensureSession();
+      if (!materialized) {
+        addSystemItem(bt("attachNeedSession"));
+        return;
+      }
+    }
     var sessionId = state.activeSessionId;
     if (!sessionId) {
       addSystemItem(bt("attachNeedSession"));
