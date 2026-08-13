@@ -425,9 +425,9 @@ impl Pinvou3Bridge {
         SessionPolicy::for_mode(mode)
     }
 
-    /// 会话级工具整形:按会话策略（[`SessionPolicy`]）取数。plain 会话原样返回
-    /// （不移除、不追加，与历史实现逐字节等价）;代码会话换 scope 并追加策略
-    /// 隐藏工具。spawn 初值与全局热刷都经此整形。
+    /// 会话级工具整形:按会话策略（[`SessionPolicy`]）取数。档案 `tools.exclude`
+    /// 对所有模式生效（plain 排除 Git，保持普通会话原有工具面）;代码会话再换
+    /// scope 并追加策略隐藏工具。spawn 初值与全局热刷都经此整形。
     ///
     /// 传入的 `tools` 是全局(plain scope)的禁用工具名。对代码会话,连接器工具
     /// 不再沿用 plain scope 的禁用集,而是改用策略给定的 code scope 禁用集 ——
@@ -439,7 +439,13 @@ impl Pinvou3Bridge {
     /// 检查是磁盘 I/O,策略对象保持纯数据）。
     pub fn shape_disallowed_tools(&self, session_id: &str, mut tools: Vec<String>) -> Vec<String> {
         let policy = self.session_policy(session_id);
-        // plain：不移除、不追加,原样返回。
+        // 档案 tools.exclude：基础集上再藏（设计期声明，所有模式）。
+        for excluded in policy.resolve().tool_exclude {
+            if !tools.iter().any(|tool| tool == excluded) {
+                tools.push(excluded.clone());
+            }
+        }
+        // plain：换 scope 与追加隐藏不适用，止于 exclude。
         if !policy.mode().is_code() {
             return tools;
         }
@@ -1137,7 +1143,8 @@ impl Pinvou3Bridge {
             plugin_registry: _,
             instructions: _,
             project_context_pack_enabled: _,
-            max_steps: _,
+            // advanced.max_steps 显式配置时覆盖；未配置则复用底座默认值。
+            max_steps: default_max_steps,
             max_subagents: _,
             snapshots_enabled: _,
             memory_enabled: _,
@@ -1247,7 +1254,7 @@ impl Pinvou3Bridge {
             plugin_registry: None,
             instructions: self.instructions(),
             project_context_pack_enabled: false,
-            max_steps: self.prefs.advanced.max_steps.unwrap_or(100),
+            max_steps: self.prefs.advanced.max_steps.unwrap_or(default_max_steps),
             // 2026-05-27: 默认 10 (原 1 → 10),为 PPT 工作流 fan-out 场景预留。
             // 原始锁定 2026-05-19 是避免 multi-subagent 并发在弱模型 + 单 vLLM 下 timeout。
             // 实测 single subagent + 串行 2-3 subagent 都可用,fan-out 4+ 仍有 timeout 风险,
@@ -2412,9 +2419,10 @@ mod tests {
         let mut bridge = fixture_bridge();
         // 未注入 predicate：一律按非代码会话处理。
         let plain = vec!["kb_search".to_string()];
+        // plain 应用档案 tools.exclude（Git 是代码会话的结构化能力，普通会话隐藏）。
         assert_eq!(
             bridge.shape_disallowed_tools("sess-plain", plain.clone()),
-            plain
+            [plain.clone(), vec!["Git".to_string()]].concat()
         );
 
         bridge.set_code_session_predicate(std::sync::Arc::new(|session_id: &str| {
@@ -2424,7 +2432,7 @@ mod tests {
         assert!(bridge.is_code_session("sess-code-project"));
         assert!(!bridge.is_code_session("sess-plain"));
 
-        // 临时与绑项目的代码会话都隐藏成品卡工具并禁用 load_skill；普通会话不受影响。
+        // 临时与绑项目的代码会话都隐藏成品卡工具并禁用 load_skill；普通会话只追加档案 exclude。
         for sid in ["sess-code-temp", "sess-code-project"] {
             let shaped = bridge.shape_disallowed_tools(sid, plain.clone());
             assert!(shaped.contains(&"mcp_pinvou3_present_artifact".to_string()));
@@ -2443,7 +2451,7 @@ mod tests {
         }
         assert_eq!(
             bridge.shape_disallowed_tools("sess-plain", plain.clone()),
-            plain
+            [plain.clone(), vec!["Git".to_string()]].concat()
         );
     }
 
@@ -2517,9 +2525,10 @@ mod tests {
         assert!(shaped.contains(&pptx[0]));
         assert!(shaped.contains(&"load_skill".to_string()));
 
-        // 普通会话不整形:原样返回传入的全局禁用集(全局禁用集由 EnginePool 按 plain scope 计算)。
+        // 普通会话不换 scope、不追加模式隐藏,但档案 tools.exclude 仍生效(Git 隐藏);
+        // 传入的全局禁用集由 EnginePool 按 plain scope 计算,原样保留。
         let shaped = bridge.shape_disallowed_tools("sess-plain", tools.clone());
-        assert_eq!(shaped, tools);
+        assert_eq!(shaped, [tools.clone(), vec!["Git".to_string()]].concat());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2610,6 +2619,7 @@ mod tests {
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: model.to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             provider_kind: None,
@@ -3602,6 +3612,27 @@ mod tests {
             allowed(false),
             Some(crate::features::assistant::tool_policy::allowed_tool_names()),
             "code 会话未限制时必须恢复 Pinvou 基础白名单"
+        );
+    }
+
+    /// 主 agent 步数预算:未显式配置时必须复用底座 `EngineConfig::default()` 的
+    /// max_steps(跟随上游调整),显式配置时 settings.json 优先。
+    #[test]
+    fn engine_config_reuses_base_max_steps_default_and_respects_override() {
+        let mut bridge = fixture_bridge();
+        let base_default = EngineConfig::default().max_steps;
+
+        assert_eq!(
+            bridge.build_engine_config().max_steps,
+            base_default,
+            "未显式配置时，主 agent 必须复用 CodeWhale 的 max_steps 默认值"
+        );
+
+        bridge.prefs.advanced.max_steps = Some(321);
+        assert_eq!(
+            bridge.build_engine_config().max_steps,
+            321,
+            "settings.json 中的 advanced.max_steps 必须继续覆盖底座默认值"
         );
     }
 
