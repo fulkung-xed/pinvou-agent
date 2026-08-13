@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Archive, Briefcase, Check, ChevronDown, Code, Cpu, Database, Edit2, FileText, Globe, Lightbulb, MessageSquare, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Sparkles, Store, Trash2, User, Users, Video, Wrench, X, Zap } from '../../components/icons.jsx';
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
+import { Toggle } from '../../components/Toggle.jsx';
 import { VllmSetupProgress } from '../../components/VllmSetupProgress.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
@@ -1083,10 +1084,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           <span className="min-w-0">
             <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">{row.title}</span>
           </span>
-          <button onClick={() => toggleTool(row.id, row.kind)} aria-label={row.id} disabled={!canMutateToolStore}
-            className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors disabled:cursor-default ${!canMutateToolStore ? 'opacity-70' : ''} ${row.enabled ? 'bg-[#34C759]' : 'bg-[#E5E5EA] dark:bg-[#39393D]'}`}>
-            <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${row.enabled ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
-          </button>
+          <Toggle checked={row.enabled} onChange={() => toggleTool(row.id, row.kind)} aria-label={row.id} disabled={!canMutateToolStore} size="sm" />
         </div>
       );
       const readonlyRow = (row, label, tone = 'green') => (
@@ -1169,10 +1167,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                           </span>
                           <span className="block text-[10px] text-gray-400 dark:text-gray-500">{t.composerProjectSkillsDesc}</span>
                         </span>
-                        <button onClick={toggleProjectSkills} aria-label="project-skills" disabled={!canMutateToolStore}
-                          className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors disabled:cursor-default ${!canMutateToolStore ? 'opacity-70' : ''} ${projectSkillsEnabled ? 'bg-[#34C759]' : 'bg-[#E5E5EA] dark:bg-[#39393D]'}`}>
-                          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${projectSkillsEnabled ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
-                        </button>
+                        <Toggle checked={projectSkillsEnabled} onChange={toggleProjectSkills} aria-label="project-skills" disabled={!canMutateToolStore} size="sm" />
                       </div>
                       {projectSkillsEnabled && (
                         <div className="mt-1.5 text-[11px] leading-snug text-amber-600 dark:text-amber-400">{t.composerProjectSkillsWarning}</div>
@@ -2129,17 +2124,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         </RowTag>
         );
       };
-      const IOSSwitch = ({ checked, onChange }) => (
-        <button
-          type="button"
-          role="switch"
-          aria-checked={checked}
-          onClick={() => onChange(!checked)}
-          className={`relative h-[26px] w-[46px] shrink-0 rounded-full transition-colors ${checked ? 'bg-[#34C759]' : ('bg-[#E5E5EA] dark:bg-[#3A3A3C]')}`}
-        >
-          <span className={`absolute left-0 top-[2px] h-[22px] w-[22px] rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-[22px]' : 'translate-x-[2px]'}`} />
-        </button>
-      );
+      const IOSSwitch = ({ checked, onChange }) => <Toggle checked={checked} onChange={onChange} size="md" />;
       const SectionButton = ({ id, icon, label, dot }) => (
         <button
           type="button"
