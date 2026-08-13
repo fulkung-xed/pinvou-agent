@@ -269,10 +269,42 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
         .map_err(|e| sanitize_command_error("reveal_model_api_key", e.user_message()))
 }
 
+/// save_model 的返回:auto 档保存时探测是否发生及回填结果(前端据此展示提示)。
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveModelOutcome {
+    /// 自动探测结果;None = 未触发(非 auto 档或未请求探测)。
+    pub image_probe: Option<ImageProbeOutcome>,
+}
+
+/// 自动探测回填结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageProbeOutcome {
+    /// `supported` / `unsupported` / `unknown`(连接不通,未做识图探测)。
+    pub status: String,
+    /// 回填后的档位 `auto` / `pinvou` / `enabled` / `disabled`;None = 保持 auto。
+    pub applied_override: Option<String>,
+    pub summary: String,
+}
+
 /// 增或改一条模型(按 id)。前端负责生成稳定 id。
+/// `probe_image_capability=true` 且档位为 auto(自动探测)时,保存前执行
+/// 连接 + 识图探测并按结果回填 override(见 `probe_and_fill_image_capability`)。
 #[tauri::command]
-pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
+pub async fn save_model(
+    model: SavedModel,
+    probe_image_capability: Option<bool>,
+    pool: State<'_, EnginePool>,
+) -> Result<SaveModelOutcome, String> {
     let model_id = model.id.clone();
+    let mut model = model;
+    // 自动探测在写盘前执行:结果回填 override 后随本次保存一起落盘。
+    let image_probe = if probe_image_capability.unwrap_or(false)
+        && model.image_capability_override == ImageCapabilityOverride::Auto
+    {
+        Some(probe_and_fill_image_capability(&mut model).await)
+    } else {
+        None
+    };
     UserPrefs::update_transaction(|prefs| {
         let old = prefs.model_by_id(&model.id).cloned();
         let mut model = apply_model_credential(model, old.as_ref())
@@ -287,7 +319,70 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
     })
     .map_err(|e| sanitize_command_error("save_model", e))?;
     pool.mark_model_updated(&model_id);
-    Ok(())
+    Ok(SaveModelOutcome { image_probe })
+}
+
+/// 「保存时检测」回填(「保存时检测」档保存时,一律检测,无表内加速):
+/// 1. 连接探测不通 → 无法确认 → 回填 `Pinvou`(自动处理,内置表兜底);
+/// 2. 连接通 → 识图探测(探测链路与真实链路对齐:always-thinking 模型注入 thinking):
+///    - 识别出测试色 → `Enabled`(支持图片);
+///    - 明确不支持(unsupported/unverified)→ **不落盘**(保持 `Auto`),
+///      返回待决策信号,由前端让用户选择:再次检测 / 去配置视觉模型 /
+///      直接保存落「自动处理」——「不支持图片」只来自用户手动选择,
+///      机器检测只提示,不钉死;
+///    - `error`(网络超时/5xx/401/DNS 等瞬时故障)→ 回填 `Pinvou`
+///      (自动处理,内置表兜底)——无法确认不降级已验证模型;
+///    - 意外状态 → 保持 `Auto`,不冒充结论。
+async fn probe_and_fill_image_capability(model: &mut SavedModel) -> ImageProbeOutcome {
+    let connection = probe_model_connection(&model.base_url, &model.api_key, Some(&model.id)).await;
+    if !connection.ok {
+        model.image_capability_override = ImageCapabilityOverride::Pinvou;
+        return ImageProbeOutcome {
+            status: "unknown".to_string(),
+            applied_override: Some("pinvou".to_string()),
+            summary: format!("无法连接模型服务，已按自动处理：{}", connection.message),
+        };
+    }
+    let probe = run_image_capability_probe(
+        &model.model,
+        &model.base_url,
+        &model.api_key,
+        Some(&model.id),
+    )
+    .await;
+    match probe.status.as_str() {
+        "supported" => {
+            model.image_capability_override = ImageCapabilityOverride::Enabled;
+            ImageProbeOutcome {
+                status: "supported".to_string(),
+                applied_override: Some("enabled".to_string()),
+                summary: probe.summary,
+            }
+        }
+        // 明确不支持:不落盘,交给用户决策(再次检测/去配置视觉模型/直接保存落自动处理)。
+        "unsupported" | "unverified" => ImageProbeOutcome {
+            status: probe.status.clone(),
+            applied_override: None,
+            summary: format!("检测到该模型未能识别图片：{}", probe.summary),
+        },
+        // 瞬时故障:无法确认,落「自动处理」(内置表兜底,不降级已验证模型)。
+        "error" => {
+            model.image_capability_override = ImageCapabilityOverride::Pinvou;
+            ImageProbeOutcome {
+                status: "error".to_string(),
+                applied_override: Some("pinvou".to_string()),
+                summary: format!(
+                    "检测失败（网络或服务问题），已按自动处理：{}",
+                    probe.summary
+                ),
+            }
+        }
+        other => ImageProbeOutcome {
+            status: other.to_string(),
+            applied_override: None,
+            summary: probe.summary,
+        },
+    }
 }
 
 /// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
@@ -680,17 +775,28 @@ pub async fn test_model_connection(
     api_key: String,
     model_id: Option<String>,
 ) -> Result<ModelConnectionTestResult, String> {
-    let url = crate::core::model_endpoint::models_probe_url(&base_url);
+    Ok(probe_model_connection(&base_url, &api_key, model_id.as_deref()).await)
+}
+
+/// 连接探测核心:GET models probe URL 验证服务可达与凭据可用。
+/// 复用方:设置页「测试连接」按钮与「自动探测」保存回填(连接不通 → 未知 →
+/// 回填 pinvou 决策,不做识图探测)。
+pub async fn probe_model_connection(
+    base_url: &str,
+    api_key: &str,
+    model_id: Option<&str>,
+) -> ModelConnectionTestResult {
+    let url = crate::core::model_endpoint::models_probe_url(base_url);
     let parsed_url = match reqwest::Url::parse(&url) {
         Ok(url) => url,
         Err(e) => {
-            return Ok(model_connection_result(
+            return model_connection_result(
                 false,
                 "invalid_url",
                 "服务地址格式不正确",
                 Some(e.to_string()),
                 None,
-            ));
+            );
         }
     };
     let client = match reqwest::Client::builder()
@@ -699,13 +805,13 @@ pub async fn test_model_connection(
     {
         Ok(client) => client,
         Err(e) => {
-            return Ok(model_connection_result(
+            return model_connection_result(
                 false,
                 "client_error",
                 "连接测试初始化失败，请稍后重试",
                 Some(format!("client: {e}")),
                 None,
-            ));
+            );
         }
     };
     // Anthropic 官方端点用 x-api-key + anthropic-version,不接受 Bearer。
@@ -713,16 +819,16 @@ pub async fn test_model_connection(
     let mut req = client.get(parsed_url);
     let provided_key = api_key.trim().to_string();
     let key = if provided_key.is_empty() {
-        match resolve_saved_model_key(model_id.as_deref()) {
+        match resolve_saved_model_key(model_id) {
             Ok(key) => key.unwrap_or_default(),
             Err(e) => {
-                return Ok(model_connection_result(
+                return model_connection_result(
                     false,
                     "credential_unavailable",
                     "无法读取已保存的 API Key，请重新填写",
                     Some(e),
                     None,
-                ));
+                );
             }
         }
     } else {
@@ -738,8 +844,8 @@ pub async fn test_model_connection(
         }
     }
     match req.send().await {
-        Ok(resp) => Ok(model_connection_http_result(resp.status())),
-        Err(e) => Ok(model_connection_error_result(&e)),
+        Ok(resp) => model_connection_http_result(resp.status()),
+        Err(e) => model_connection_error_result(&e),
     }
 }
 
@@ -765,6 +871,11 @@ const IMAGE_CAPABILITY_TEST_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABA
 /// 视觉探针提示词:让模型用一个词说出主体颜色,回复短、可校验。
 const IMAGE_CAPABILITY_TEST_PROMPT: &str = "这张图片的主体颜色是什么？用一个词回答。";
 const IMAGE_CAPABILITY_TEST_MAX_TOKENS: u32 = 64;
+/// always-thinking 模型(kimi-for-coding 等)的探测上限:thinking 开启时先输出
+/// 大量 reasoning 再输出答案,64 token 会被 thinking 吃掉或触发网关 max_tokens
+/// 下限 400,导致识图探测误判(2026-08 kimi-for-coding 二次实测)。1024 足够
+/// reasoning 起步 + 一句「红色」答案。
+const IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING: u32 = 1024;
 
 fn image_capability_result(
     status: &str,
@@ -794,7 +905,11 @@ fn summarize_image_probe_text(text: &str, max_chars: usize) -> String {
 
 fn image_capability_test_payload(model: &str) -> serde_json::Value {
     // 注意:不得携带 temperature——kimi-for-coding 等模型只接受默认值,显式传会 400。
-    serde_json::json!({
+    let thinking_model =
+        crate::features::assistant::image_capability::moonshot_model_requires_explicit_thinking(
+            model,
+        );
+    let mut payload = serde_json::json!({
         "model": model,
         "messages": [{
             "role": "user",
@@ -808,8 +923,45 @@ fn image_capability_test_payload(model: &str) -> serde_json::Value {
                 },
             ],
         }],
-        "max_tokens": IMAGE_CAPABILITY_TEST_MAX_TOKENS,
+        // always-thinking 模型:thinking 输出吃 token,上限提到 1024;
+        // 其余模型保持 64(回答「红色」绰绰有余)。
+        "max_tokens": if thinking_model {
+            IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING
+        } else {
+            IMAGE_CAPABILITY_TEST_MAX_TOKENS
+        },
         "stream": false,
+    });
+    // always-thinking 模型(kimi-for-coding 等):官方接入要求 thinking 保持开启,
+    // 与 bridge 真实链路同一口径(`moonshot_model_requires_explicit_thinking`)。
+    // 省略该参数网关会拒绝请求,导致识图探测误判为「不支持图片」(2026-08 实测)。
+    if thinking_model {
+        payload["thinking"] = serde_json::json!({ "type": "enabled" });
+    }
+    payload
+}
+
+/// Anthropic Messages 协议的识图探测 payload:图片用 `image` 块 + base64 source
+/// (OpenAI 兼容端点的 image_url data URL 不被 Anthropic 接受)。max_tokens 1024
+/// 与 OpenAI 路径同档,保证回复空间。
+fn image_capability_test_payload_anthropic(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "max_tokens": IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": IMAGE_CAPABILITY_TEST_PROMPT },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": IMAGE_CAPABILITY_TEST_PNG_BASE64,
+                    },
+                },
+            ],
+        }],
     })
 }
 
@@ -860,6 +1012,108 @@ fn image_capability_response_summary(body: &str, status_code: u16) -> String {
         .unwrap_or_else(|| format!("HTTP {status_code}"))
 }
 
+/// 400/422 错误体是否构成"明确不支持图片输入":需**同时**提及图片相关概念
+/// 且带否定/拒绝语境(does not support image、仅支持文本…)。只提 image 不够——
+/// 模型名(gpt-image-1 not found)、网关正文同样可能含 image,不能一律归为
+/// 模型不支持图片(审阅缺口 #104)。其余 400/422 判"无法确认"。
+fn image_rejection_signal(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let mentions_image = [
+        "image",
+        "vision",
+        "multimodal",
+        "图片",
+        "图像",
+        "识图",
+        "视觉",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword));
+    if !mentions_image {
+        return false;
+    }
+    [
+        "not support",
+        "not accept",
+        "cannot",
+        "can't",
+        "won't",
+        "unable to",
+        "unsupported",
+        "unknown variant", // unknown variant `image_url`(schema 拒绝,如 DeepSeek)
+        "expected `text`", // 只接受 text 内容块,未定义 image_url 类型
+        "expected text",
+        "does not allow",
+        "only text",
+        "only supports text",
+        "only accepts text",
+        "text-only",
+        "不支持",
+        "无法识别",
+        "不能识别",
+        "无法处理",
+        "不能处理",
+        "不处理",
+        "仅支持文本",
+        "只支持文本",
+        "仅处理文本",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+}
+
+/// 2xx 回复是否**明确表示看不到图片**("我看不到图片"等):模型自己承认
+/// 不能看图,是"不支持图像识别"的直接证据;其余未识别出测试色的回复
+/// (描述了图片/纯模板话术)统一归"未能正确识别图像,原因未知"。
+fn reply_explicitly_cannot_see(reply: &str) -> bool {
+    let lower = reply.to_lowercase();
+    [
+        "看不到",
+        "没有图片",
+        "未看到",
+        "无法看到",
+        "不能看到",
+        "看不了",
+        "看不到图片",
+        "cannot see",
+        "can't see",
+        "can not see",
+        "no image",
+        "no picture",
+        "don't see",
+        "do not see",
+        "not see any",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+}
+
+/// 按模型回复文本分类(OpenAI choices 与 Anthropic content 提取出文本后共用):
+/// ① 识别出测试色 → 支持;② 明确说看不到图片 → 不支持图像识别;
+/// ③ 其余未识别出测试色(描述图片/模板话术/给错颜色)→ 未能正确识别图像,原因未知
+/// ——可能是请求层(图片未送达/网关剥离)、模型行为(拒绝回答)或能力,不冒充结论。
+fn classify_image_reply(reply: &str, status_code: u16) -> ImageCapabilityTestResult {
+    let summarized = summarize_image_probe_text(reply, 120);
+    let recognized = reply.to_lowercase().contains("red") || reply.contains('红');
+    if recognized {
+        image_capability_result("supported", true, summarized, Some(status_code))
+    } else if reply_explicitly_cannot_see(reply) {
+        image_capability_result(
+            "unsupported",
+            false,
+            format!("模型回复看不到图片，不支持图像识别（模型回复：{summarized}）"),
+            Some(status_code),
+        )
+    } else {
+        image_capability_result(
+            "unverified",
+            false,
+            format!("未能正确识别图像，原因未知（模型回复：{summarized}）"),
+            Some(status_code),
+        )
+    }
+}
+
 fn classify_image_capability_http(
     status: reqwest::StatusCode,
     body: &str,
@@ -867,27 +1121,28 @@ fn classify_image_capability_http(
     let status_code = status.as_u16();
     if status.is_success() {
         return match extract_chat_reply_summary(body) {
-            Some(reply) if !reply.is_empty() => {
-                let verified = reply.to_lowercase().contains("red") || reply.contains('红');
-                image_capability_result(
-                    "supported",
-                    verified,
-                    summarize_image_probe_text(&reply, 120),
-                    Some(status_code),
-                )
-            }
+            Some(reply) if !reply.is_empty() => classify_image_reply(&reply, status_code),
             _ => image_capability_result(
-                "error",
+                "unverified",
                 false,
-                "服务接受了请求但返回了空回复，无法确认识图结果".to_string(),
+                "服务接受了请求但返回了空回复，未能正确识别图像，原因未知".to_string(),
                 Some(status_code),
             ),
         };
     }
     let summary = image_capability_response_summary(body, status_code);
     match status_code {
-        // 400/422 是对该探针请求的明确参数拒绝(invalid image / does not support image 等)。
-        400 | 422 => image_capability_result("unsupported", false, summary, Some(status_code)),
+        // 400/422 统一两档:错误体点名图片/视觉输入拒绝 → 不支持图像识别;
+        // 其余(模型名、参数、网关格式)→ 未能正确识别图像,原因未知。
+        400 | 422 if image_rejection_signal(&summary) => {
+            image_capability_result("unsupported", false, summary, Some(status_code))
+        }
+        400 | 422 => image_capability_result(
+            "unverified",
+            false,
+            format!("未能正确识别图像，原因未知（HTTP {status_code}）：{summary}"),
+            Some(status_code),
+        ),
         _ => image_capability_result("error", false, summary, Some(status_code)),
     }
 }
@@ -918,64 +1173,109 @@ fn image_capability_transport_error(err: &reqwest::Error) -> ImageCapabilityTest
     image_capability_result("error", false, summary, None)
 }
 
-/// 测试图片输入能力(设计 §7.3):POST {base_url}/chat/completions 携带内置纯色 PNG,
-/// 验证当前编辑中的模型能否识图。仅由设置页主动点击触发,无任何启动/定时自动测试。
+/// 识图探测核心(设计 §7.3):POST {base_url}/chat/completions 携带内置纯色 PNG,
+/// 返回 `ImageCapabilityTestResult`(不发 Result 错误——连接失败等也收敛为结果)。
 /// 入参与凭据解析和 test_model_connection 一致:表单新填 key 优先,否则读已保存凭据。
-#[tauri::command]
-pub async fn test_image_input_capability(
-    model: String,
-    base_url: String,
-    api_key: String,
-    model_id: Option<String>,
-) -> Result<ImageCapabilityTestResult, String> {
+/// 复用方:设置页「测试图片能力」按钮与「自动探测」保存回填。
+pub async fn run_image_capability_probe(
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+    model_id: Option<&str>,
+) -> ImageCapabilityTestResult {
     let model = model.trim().to_string();
     if model.is_empty() {
-        return Ok(image_capability_result(
+        return image_capability_result(
             "error",
             false,
             "模型 ID 为空，请先填写模型".to_string(),
             None,
-        ));
+        );
     }
-    let url = format!("{}/chat/completions", base_url.trim().trim_end_matches('/'));
-    if let Err(e) = reqwest::Url::parse(&url) {
-        return Ok(image_capability_result(
-            "error",
-            false,
-            format!("服务地址格式不正确: {e}"),
-            None,
-        ));
-    }
+    // 复用 strip_chat_completions_suffix:用户 base_url 已含 /v1/chat/completions 时
+    // 不再拼出重复路径(prefs/model.rs 同一口径)。
+    let url = format!(
+        "{}/chat/completions",
+        crate::platform::prefs::model::strip_chat_completions_suffix(base_url)
+    );
+    let parsed_url = match reqwest::Url::parse(&url) {
+        Ok(url) => url,
+        Err(e) => {
+            return image_capability_result(
+                "error",
+                false,
+                format!("服务地址格式不正确: {e}"),
+                None,
+            );
+        }
+    };
+    // Anthropic 原生协议:URL /v1/messages + x-api-key/anthropic-version,payload
+    // 用 image base64 source;OpenAI 兼容端点走 chat/completions + image_url。
+    let is_anthropic = crate::core::model_endpoint::is_anthropic_api_url(&parsed_url);
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
     {
         Ok(client) => client,
         Err(e) => {
-            return Ok(image_capability_result(
-                "error",
-                false,
-                format!("测试初始化失败: {e}"),
-                None,
-            ));
+            return image_capability_result("error", false, format!("测试初始化失败: {e}"), None);
         }
     };
     let provided_key = api_key.trim().to_string();
     let key = if provided_key.is_empty() {
-        match resolve_saved_model_key(model_id.as_deref()) {
+        match resolve_saved_model_key(model_id) {
             Ok(key) => key.unwrap_or_default(),
             Err(e) => {
-                return Ok(image_capability_result(
+                return image_capability_result(
                     "error",
                     false,
                     format!("无法读取已保存的 API Key，请重新填写: {e}"),
                     None,
-                ));
+                );
             }
         }
     } else {
         provided_key
     };
+    if is_anthropic {
+        let messages_url = crate::core::model_endpoint::anthropic_messages_url(base_url);
+        let mut req = client
+            .post(messages_url)
+            .json(&image_capability_test_payload_anthropic(&model));
+        if !key.trim().is_empty() {
+            req = req
+                .header("x-api-key", key.trim())
+                .header("anthropic-version", "2023-06-01");
+        }
+        return match req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    // Anthropic 成功响应无 choices:content 是 text/image 块数组,
+                    // 提取文本后走同一套回复分类;空回复 → 无法确认。
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(reply) =
+                            crate::core::model_endpoint::anthropic_messages_text(&value)
+                        {
+                            if !reply.trim().is_empty() {
+                                return classify_image_reply(&reply, status.as_u16());
+                            }
+                        }
+                    }
+                    image_capability_result(
+                        "unverified",
+                        false,
+                        "服务接受了请求但返回了空回复，未能正确识别图像，原因未知".to_string(),
+                        Some(status.as_u16()),
+                    )
+                } else {
+                    classify_image_capability_http(status, &body)
+                }
+            }
+            Err(e) => image_capability_transport_error(&e),
+        };
+    }
     let mut req = client
         .post(url)
         .json(&image_capability_test_payload(&model));
@@ -986,10 +1286,21 @@ pub async fn test_image_input_capability(
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            Ok(classify_image_capability_http(status, &body))
+            classify_image_capability_http(status, &body)
         }
-        Err(e) => Ok(image_capability_transport_error(&e)),
+        Err(e) => image_capability_transport_error(&e),
     }
+}
+
+/// 设置页「测试图片能力」按钮入口:仅由用户主动点击触发,无任何启动/定时自动测试。
+#[tauri::command]
+pub async fn test_image_input_capability(
+    model: String,
+    base_url: String,
+    api_key: String,
+    model_id: Option<String>,
+) -> Result<ImageCapabilityTestResult, String> {
+    Ok(run_image_capability_probe(&model, &base_url, &api_key, model_id.as_deref()).await)
 }
 
 /// 通用设置字段补丁。搜索、桌宠、模型列表和本地模型初始化状态由专用命令管理，
@@ -1133,11 +1444,18 @@ mod tests {
         );
         // kimi-for-coding 等模型只接受默认 temperature,显式传会 400。
         assert!(payload.get("temperature").is_none());
+        // kimi-for-coding 是 always-thinking 模型:官方接入要求 thinking 开启,
+        // 探测请求必须带,否则 Moonshot 网关拒绝请求误判为「不支持图片」(2026-08 实测);
+        // 且 max_tokens 需足够 thinking 输出(64 会被 reasoning 吃掉或 400)。
+        assert_eq!(
+            payload["thinking"]["type"].as_str(),
+            Some("enabled"),
+            "kimi-for-coding 探测请求必须带 thinking: {{type: enabled}}"
+        );
         assert_eq!(
             payload.get("max_tokens").and_then(|v| v.as_u64()),
-            Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS as u64)
+            Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64)
         );
-        assert_eq!(payload.get("stream").and_then(|v| v.as_bool()), Some(false));
         let content = payload["messages"][0]["content"]
             .as_array()
             .expect("content must be multimodal parts");
@@ -1153,6 +1471,44 @@ mod tests {
             .expect("image part must carry a data url");
         assert!(url.starts_with("data:image/png;base64,"));
         assert!(url.len() > "data:image/png;base64,".len() + 100);
+    }
+
+    #[test]
+    fn image_capability_payload_thinking_only_for_always_thinking_models() {
+        // 非 Moonshot always-thinking 模型:不注入 thinking,max_tokens 保持 64。
+        let payload = image_capability_test_payload("gpt-4o");
+        assert!(
+            payload.get("thinking").is_none(),
+            "gpt-4o 探测请求不应携带 thinking"
+        );
+        assert_eq!(
+            payload.get("max_tokens").and_then(|v| v.as_u64()),
+            Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS as u64),
+            "普通模型 max_tokens 保持 64"
+        );
+        // always-thinking 模型:注入 thinking 且 max_tokens 提到 1024
+        // (64 会被 reasoning 吃掉或触发网关下限 400)。
+        let payload = image_capability_test_payload("kimi-k3");
+        assert_eq!(
+            payload["thinking"]["type"].as_str(),
+            Some("enabled"),
+            "kimi-k3 同属 always-thinking,需注入 thinking"
+        );
+        assert_eq!(
+            payload.get("max_tokens").and_then(|v| v.as_u64()),
+            Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64),
+            "thinking 模型 max_tokens 需足够 reasoning 输出"
+        );
+        let payload = image_capability_test_payload("kimi-k2.7-code");
+        assert_eq!(
+            payload["thinking"]["type"].as_str(),
+            Some("enabled"),
+            "kimi-k2.7-code 同属 always-thinking,需注入 thinking"
+        );
+        assert_eq!(
+            payload.get("max_tokens").and_then(|v| v.as_u64()),
+            Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64)
+        );
     }
 
     /// 锚定内置测试图是合法 PNG:块 CRC 与 zlib 数据全部有效、64×64 RGB 纯红。
@@ -1232,20 +1588,50 @@ mod tests {
     }
 
     #[test]
-    fn image_capability_supported_unverified_when_reply_omits_color() {
-        // API 接受图片但回复没提颜色也算 supported,防止模型表达差异误杀。
+    fn image_capability_unverified_when_reply_omits_color() {
+        // API 接受图片但回复没识别出测试色(纯红):统一归"未能正确识别图像,
+        // 原因未知"——描述图片内容、给错颜色、模板话术都不冒充结论。
         let body = r#"{"choices":[{"message":{"content":"I see a small square picture."}}]}"#;
         let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
-        assert_eq!(result.status, "supported");
+        assert_eq!(result.status, "unverified");
         assert!(!result.verified);
+        assert!(result.summary.contains("未能正确识别图像"));
         assert!(result.summary.contains("square"));
+
+        let body = r#"{"choices":[{"message":{"content":"图片是蓝色的"}}]}"#;
+        let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
+        assert_eq!(result.status, "unverified");
+
+        // 纯文本模板回复同样"原因未知",不宣称支持也不宣称不支持。
+        let body = r#"{"choices":[{"message":{"content":"你好，我是AI助手，有什么可以帮你？"}}]}"#;
+        let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
+        assert_eq!(result.status, "unverified");
+        assert!(result.summary.contains("未能正确识别图像"));
     }
 
     #[test]
-    fn image_capability_empty_reply_is_error_not_unsupported() {
+    fn image_capability_explicit_cannot_see_is_unsupported() {
+        // 模型明确说看不到图片:自己承认不能看图,是"不支持图像识别"
+        // 的直接证据。
+        let body = r#"{"choices":[{"message":{"content":"我看不到任何图片，请直接告诉我问题"}}]}"#;
+        let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
+        assert_eq!(result.status, "unsupported");
+        assert!(!result.verified);
+        assert!(result.summary.contains("不支持图像识别"));
+        assert!(result.summary.contains("看不到图片"));
+
+        // 英文表述同样命中。
+        let body =
+            r#"{"choices":[{"message":{"content":"I cannot see any image in the message"}}]}"#;
+        let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
+        assert_eq!(result.status, "unsupported");
+    }
+
+    #[test]
+    fn image_capability_empty_reply_is_unverified() {
         let body = r#"{"choices":[{"message":{"content":"  "}}]}"#;
         let result = classify_image_capability_http(reqwest::StatusCode::OK, body);
-        assert_eq!(result.status, "error");
+        assert_eq!(result.status, "unverified");
         assert!(!result.verified);
         assert!(result.summary.contains("空回复"));
     }
@@ -1261,13 +1647,67 @@ mod tests {
     }
 
     #[test]
-    fn image_capability_422_falls_back_to_raw_body_summary() {
+    fn image_capability_400_422_unverified_when_not_image_rejection() {
+        // 400/422 未点名图片的拒绝(模型名不存在、参数错误、网关格式):
+        // 统一"未能正确识别图像,原因未知",不归"不支持图像识别"。
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"The model `gpt-image-1` does not exist"}}"#,
+        );
+        assert_eq!(result.status, "unverified");
+        assert!(result.summary.contains("未能正确识别图像"));
+        assert!(result.summary.contains("does not exist"));
+
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"max_tokens 65536 exceeds the maximum"}}"#,
+        );
+        assert_eq!(result.status, "unverified");
+
+        // 泛拒绝(无可见配置问题)同样"原因未知"。
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Request rejected by gateway"}}"#,
+        );
+        assert_eq!(result.status, "unverified");
+        assert!(result.summary.contains("Request rejected by gateway"));
+
+        // 422 提及 image 但无否定语境(invalid image payload):同上。
         let result = classify_image_capability_http(
             reqwest::StatusCode::UNPROCESSABLE_ENTITY,
             "invalid image payload",
         );
+        assert_eq!(result.status, "unverified");
+        assert!(result.summary.contains("invalid image payload"));
+    }
+
+    #[test]
+    fn image_capability_400_unsupported_only_when_negative_image_context() {
+        // 明确"不支持图片输入":mention image + 否定语境 → unsupported。
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"this model does not support image input"}}"#,
+        );
         assert_eq!(result.status, "unsupported");
-        assert_eq!(result.summary, "invalid image payload");
+        assert_eq!(result.summary, "this model does not support image input");
+        assert_eq!(result.http_status, Some(400));
+
+        // 网关层拒绝的图片请求(OpenAI 风格 only text)→ unsupported。
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            r#"{"error":{"message":"invalid image_url: this API only supports text content"}}"#,
+        );
+        assert_eq!(result.status, "unsupported");
+        assert_eq!(result.http_status, Some(422));
+
+        // DeepSeek 真实报错:网关 schema 未定义 image_url 内容块、只接受 text。
+        // "unknown variant `image_url`, expected `text`" 是明确的不支持图片输入。
+        let result = classify_image_capability_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text` at line 1 column 401"}}"#,
+        );
+        assert_eq!(result.status, "unsupported");
+        assert_eq!(result.http_status, Some(400));
     }
 
     #[test]

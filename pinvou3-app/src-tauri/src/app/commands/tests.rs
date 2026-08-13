@@ -1481,8 +1481,14 @@ fn native_image_message_builds_marker_lines_in_order() {
         "文本附件 markdown 应照旧内联"
     );
     // 官方标记行按用户选择顺序出现,路径为暂存后的 workspace 路径。
-    let marker_a = format!("[Attached image: {}]", ws.join("attachments/a.png").display());
-    let marker_b = format!("[Attached image: {}]", ws.join("attachments/b.jpg").display());
+    let marker_a = format!(
+        "[Attached image: {}]",
+        ws.join("attachments/a.png").display()
+    );
+    let marker_b = format!(
+        "[Attached image: {}]",
+        ws.join("attachments/b.jpg").display()
+    );
     let marker_a_pos = segment.find(&marker_a).expect("a.png 标记行必须存在");
     let marker_b_pos = segment.find(&marker_b).expect("b.jpg 标记行必须存在");
     assert!(
@@ -1572,8 +1578,7 @@ fn native_prepare_text_only_and_non_image_regression() {
         &ws,
     );
     assert_eq!(
-        with_text,
-        legacy,
+        with_text, legacy,
         "非图片附件路径必须与现有文本拼接结果一致"
     );
 

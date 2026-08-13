@@ -2298,8 +2298,7 @@
     for (var i = state.chatItems.length - 1; i >= 0; i--) {
       var it = state.chatItems[i];
       if (it.type === "tool" && fileMutationAction(it.name, it.args)) {
-        var ap = extractArtifactPath(it.args);
-        if (ap && basename(ap) === bn) return false;
+        if (extractArtifactPaths(it.args).some(function (ap) { return basename(ap) === bn; })) return false;
       }
       if (it.type === "user") return false;
       if (it.type === "artifact_card" && basename(it.path) === bn) return true;
@@ -2313,6 +2312,12 @@
     }
     addChatItem(item);
     notify();
+  }
+  function addAuthoritySyncNotice(text) {
+    if (state.chatItems.some(function (item) {
+      return item && item.authoritySyncNotice;
+    })) return;
+    addSystemItem(text, { authoritySyncNotice: true });
   }
   function compactPruneRollupText(count) {
     return bt("compactDone") + bt("compactAuto") + " " +
@@ -3271,13 +3276,12 @@
         var db = dc[dj];
         var dbMutation = db.type === "tool_use" && fileMutationAction(db.name, db.input);
         if (dbMutation) {
-          var dap = extractArtifactPath(db.input);
-          if (dap) {
+          extractArtifactPaths(db.input).forEach(function (dap) {
             lastDirtyArtifactId[dap] = db.id;
             // 与实时 tool_end 同一门控:tmp/ 中间文件、非成品扩展名不记账,
             // 否则实时不进面板的文件切 session 重放后反而兜底冒出成品卡。
             if (dbMutation !== "edit" && isDeliverable(dap)) writtenArtifacts[dap] = true;
-          }
+          });
         } else if (db.type === "tool_use" && isPresentArtifactTool(db.name)) {
           var pap = extractArtifactPath(db.input);
           var pres = resultById[db.id];
@@ -3423,9 +3427,9 @@
           // 顺序在前(必须先 present 才进集合),此处 findPresentedArtifact 能命中。
           if (fileMutationAction(b.name, b.input)) {
             var wres = resultById[b.id];
-            var wap = extractArtifactPath(b.input);
-            // 去重:同产物只在最后一次修改处补一张卡(与实时对齐)。
-            if (!(wres && wres.is_error) && wap && lastDirtyArtifactId[wap] === b.id) {
+            extractArtifactPaths(b.input).forEach(function (wap) {
+              // 去重:同产物只在最后一次修改处补一张卡(与实时对齐)。
+              if ((wres && wres.is_error) || lastDirtyArtifactId[wap] !== b.id) return;
               var wprev = findPresentedArtifact(wap);
               if (wprev) {
                 addChatItem({
@@ -3436,7 +3440,7 @@
                 // AI 写了产物但全程没 present_artifact → 兜底补首卡(与实时 chat:done 对齐)
                 addChatItem({ type: "artifact_card", path: wap, title: basename(wap), description: "", time: "", sessionId: state.activeSessionId });
               }
-            }
+            });
           }
         }
       }
@@ -3805,13 +3809,34 @@
       }
     } catch (e) { /* workspace 不存在(新 session)等,忽略 */ }
   }
-  // File.write / File.edit 的 args 里提取产物路径
-  function extractArtifactPath(args) {
-    if (!args) return null;
+  function pushArtifactPath(paths, path) {
+    if (typeof path !== "string" || !path.trim()) return;
+    path = path.trim();
+    if (paths.indexOf(path) < 0) paths.push(path);
+  }
+  function extractArtifactPaths(args) {
+    if (!args) return [];
     if (typeof args === "string") {
-      try { args = JSON.parse(args); } catch (e) { return null; }
+      try { args = JSON.parse(args); } catch (e) { return []; }
     }
-    return args.path || args.file_path || args.filename || null;
+    var paths = [];
+    pushArtifactPath(paths, args.path || args.file_path || args.filename);
+    [args.replace, args.changes].forEach(function (changes) {
+      if (!Array.isArray(changes)) return;
+      changes.forEach(function (change) {
+        if (change && typeof change === "object") pushArtifactPath(paths, change.path || change.file_path || change.filename);
+      });
+    });
+    String(args.patch || "").split(/\r?\n/).forEach(function (line) {
+      var custom = /^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/.exec(line);
+      if (custom) { pushArtifactPath(paths, custom[1]); return; }
+      var unified = /^\+\+\+\s+(?:b\/)?(.+?)\s*$/.exec(line);
+      if (unified && unified[1] !== "/dev/null") pushArtifactPath(paths, unified[1]);
+    });
+    return paths;
+  }
+  function extractArtifactPath(args) {
+    return extractArtifactPaths(args)[0] || null;
   }
 
   function fileMutationAction(name, args) {
@@ -3820,7 +3845,7 @@
     }
     if (String(name || "").toLowerCase() === "file") {
       var action = String(args && args.action || "").toLowerCase();
-      return action === "write" || action === "edit" ? action : null;
+      return action === "write" || action === "edit" || action === "patch" ? action : null;
     }
     if (name === "write_file") return "write";
     if (name === "edit_file") return "edit";
@@ -3897,7 +3922,9 @@
       turnOwnerBuffer.remoteCommittedRevision = "";
     }
     runSyncOnSession(sid, function () {
-      state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
+      state.chatItems = state.chatItems.filter(function (item) {
+        return !item.turnErrorNotice && !item.authoritySyncNotice;
+      });
       var uitem = {
         type: "user",
         text: displayText,
@@ -5113,8 +5140,7 @@
     // 之前不触发续卡 → 改完没新卡片 → 没法对改后产物再召唤 pinvou(核账闭环断裂)。
     var mutationAction = meta && fileMutationAction(meta.name, meta.args);
     if (p.success && mutationAction) {
-      var ap = extractArtifactPath(meta.args);
-      if (ap) {
+      extractArtifactPaths(meta.args).forEach(function (ap) {
         // 面板只收「成品」:成品型扩展名(自动当成品)或之前 present_artifact 过的文件;
         // 中间草稿(content_p1.txt / *_params.json 等)不进面板。edit_file 只改已有不新建。
         if (mutationAction !== "edit" && (isDeliverable(ap) || findPresentedArtifact(ap))) trackArtifact(ap);
@@ -5126,7 +5152,7 @@
         var _apbn = basename(ap);
         var isArtifact = !!findPresentedArtifact(ap) || state.artifacts.some(function (a) { return basename(a.path) === _apbn; });
         if (isArtifact) markTurnDirtyArtifact(ap);
-      }
+      });
     }
 
     // 兜底：Plan 模式下 AI 调了被白名单/sandbox 拦的工具 → 弹兜底卡，给两条出路
@@ -5159,6 +5185,9 @@
       return;
     }
     var doneBuffer = sid ? getBuffer(sid) : null;
+    var completedLocalTurn = !!(
+      doneBuffer && doneBuffer.localTurnOwned && !isScheduledRunSession(sid)
+    );
     if (doneBuffer && !doneBuffer.localTurnOwned) {
       // transcript_committed precedes chat:done. Preserve its revision when a
       // reconnecting client first materializes the turn at the terminal tail.
@@ -5227,7 +5256,7 @@
       currentStreamText = "";
       currentStreamId = 0;
     });
-    if (doneBuffer) {
+    if (doneBuffer && !completedLocalTurn) {
       // Rust has already committed the final transcript before chat:done. Keep
       // both UIs behind a short authority barrier until that snapshot is loaded.
       var finalAssistantMessage = null;
@@ -5246,17 +5275,31 @@
       doneBuffer.remoteTerminalSeen = true;
       doneBuffer.busy = false;
       if (sid === state.activeSessionId) saveWorkingSetTo(doneBuffer);
+    } else if (completedLocalTurn) {
+      // A local turn is already authoritative in this desktop process. Saved
+      // transcript verification remains best-effort and must not lock the next
+      // local message behind a cross-client synchronization state.
+      doneBuffer.deferredRemoteUserEvent = null;
+      doneBuffer.localTurnOwned = false;
+      doneBuffer.remoteTurnActive = false;
+      doneBuffer.remoteTerminalSeen = false;
+      doneBuffer.remoteBaselineMessageCount = null;
+      doneBuffer.remoteBaselineTrusted = false;
+      doneBuffer.remoteExpectedAssistantKey = "";
+      doneBuffer.remoteCommittedRevision = "";
+      doneBuffer.busy = false;
+      if (sid === state.activeSessionId) saveWorkingSetTo(doneBuffer);
     }
     notify();
     // 异步收尾(按 sid 路由,active/后台通用)
     (async function () {
       await persistMessagesFor(sid);
-      var reconciled = await reconcileRemoteTurn(sid);
+      var reconciled = completedLocalTurn ? true : await reconcileRemoteTurn(sid);
       if (reconciled) await persistMessagesFor(sid);
       await refreshHistoryList();
       if (!reconciled) {
         runSyncOnSession(sid, function () {
-          addSystemItem(bt("remoteDoneUnsynced"));
+          addAuthoritySyncNotice(bt("remoteDoneUnsynced"));
         });
       }
       notify();
@@ -5267,10 +5310,18 @@
 
   listen("chat:usage", function (e) { onSessionEvent(e, function () {
     var sid = e.payload && e.payload.session_id;
-    if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加值≠占用，保留上个准确值
+    // 真实窗口是模型能力常量，不随轮内请求数变化，必须先于 dirty guard 消费：
+    // 工具轮（最常见的 Agent 场景）只跳过不可信的累计 input，分母仍要更新。
+    var windowTok = Number(e.payload && e.payload.context_window) || 0;
+    if (windowTok > 0 && windowTok !== state.tokens.max) {
+      state.tokens.max = windowTok; // 云端真实窗口，替代 32K 假分母
+      notify(); // 窗口变化也要通知 UI（即使本轮 input 不可信）
+    }
+    if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加 input 不可信，保留上个准确值
     var input = Number(e.payload && e.payload.input_tokens || 0);
-    if (input > 0) {
-      state.tokens = { input: input, max: maxModelLen };
+    // 累加值超过窗口说明仍有多请求（内部重试等无事件轮），跳过避免显示超上限
+    if (input > 0 && input <= state.tokens.max) {
+      state.tokens = { input: input, max: state.tokens.max };
       notify();
     }
   }); });
@@ -6150,9 +6201,14 @@
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  async function saveModel(model) {
-   await invoke("save_model", { model: model });
+   // probe_image_capability 是保存命令的独立参数(「自动探测」档),不落 SavedModel。
+   var probeImageCapability = !!model.probe_image_capability;
+   var clean = Object.assign({}, model);
+   delete clean.probe_image_capability;
+   var outcome = await invoke("save_model", { model: clean, probeImageCapability: probeImageCapability });
    await loadModels();
    await loadEffectiveModelConfig();
+   return outcome || null;
  }
  async function revealModelApiKey(id) {
    return await invoke("reveal_model_api_key", { id: id });
@@ -8503,6 +8559,8 @@
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
+    getImageInputCapability: getImageInputCapability,
+    testImageInputCapability: testImageInputCapability,
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,

@@ -6,13 +6,13 @@
 
 | Item | Value |
 |---|---|
-| Upstream | `v0.9.5` at `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| Public maintenance branch | `Pinvou/CodeWhale:pinvou3-clean` at `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| Merged fixes | `Pinvou/CodeWhale#9` and `Pinvou/CodeWhale#11` are merged; the current maintenance head is `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| Public status | `pinvou3-clean` and immutable tag `pinvou-v0.9.5-r5` both resolve to the public maintenance head; `r1` through `r4` remain immutable historical tags |
-| Previous baseline backup | Tag `pinvou-v0.9.0-r4` and branch `backup/pinvou3-clean-v0.9.0-r4`, both at `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| Drift | 48 files, `+2177/-269` |
-| Organization | Five long-lived topics in seven linear commits replayed from `v0.9.5` |
+| Upstream | `v0.9.6` at `9237a5778facc391a5bcffc91e89d8350ba95761` |
+| Upgrade branch | `pinvou3-clean-v0.9.6` at `944a844a26334bb88d44ecda07006994df3f7971` (acceptance done; to be published as `Pinvou/CodeWhale:pinvou3-clean` head with immutable tag `pinvou-v0.9.6-r1`) |
+| Merged fixes | `Pinvou/CodeWhale#9` and `Pinvou/CodeWhale#11` are merged; their content is carried by the ported topics |
+| Public status | Previous public baseline `pinvou-v0.9.5-r5` (`2eceab4e1`) remains an immutable historical tag |
+| Previous baseline backup | Tag `pinvou-v0.9.0-r4` and branch `backup/pinvou3-clean-v0.9.0-r4`, both at `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624`; v0.9.5 baseline kept as `pinvou-v0.9.5-r5` |
+| Drift | 50 files, `+2767/-336` (plus PR2 vision commit) |
+| Organization | Five long-lived topics in eleven linear commits replayed from `v0.9.6` |
 
 ### Published session fix
 
@@ -23,39 +23,27 @@
 - Two CodeWhale tests, two parent `forkguard_*` tests, and Tauri/Web frontend behavior coverage protect side-effect-free runtime reads, observable and idempotent explicit recovery, safe secondary Store opening, durable startup recovery, and consecutive sends after local completion.
 - The fix is included in the published head, drift figures, and immutable tag `pinvou-v0.9.5-r5`; CodeWhale required checks and parent automation pass.
 
-### Pending change (2026-08-12 · slow-device vision timeout adaptation, unreleased)
+### Vision adaptation (2026-08-12 · slow-device timeout + configurability)
 
-- Symptom: on Intel iGPU (UHD 750, Vulkan driver 30.0.100.9805) a cold-start
-  `image_analyze` request exceeds the 120s client timeout; all 4 retries queue
-  behind the slow request and fail → `Retry exhausted` → the main model retries
-  → loop (measured single cold request: 18-50s; first run includes Vulkan
-  pipeline compilation which can exceed 120s).
-- Change (`CodeWhale/crates/tui/src/vision/tools.rs`, 2 edits):
-  - `image_analyze` switched to **streaming** (`stream: true`): total duration
-    is capped at 300s by the stream loop (reqwest overall timeout removed;
-    30s connect timeout kept); on timeout the partially accumulated content is
-    returned with a `truncated` marker instead of failing the whole request and
-    triggering the retry loop. `DEFAULT_VISION_MAX_OUTPUT_TOKENS` stays at the
-    upstream 4096 (same for local and cloud — long-document transcription is
-    not crippled; on slow devices generation short of 4096 is bounded by the
-    streaming timeout). Real descriptions are ~150 tokens, so the limit never
-    affects normal-case speed.
-  - `image_analyze` client timeout 120s → 300s (upper bound only; cloud vision
-    models, typically 10-30s, are unaffected).
-- Status: benchmarks confirm single requests take 8-50s (CPU/Vulkan, 3 runs
-  each); full forkguard/contract regression pending the release flow.
-- Addition (same file, same section): `image_analyze` request construction
-  improved — added a system prompt (image type / verbatim text transcription /
-  key elements and layout, no fabrication), temperature 0.7 → 0.2, and the
-  default prompt upgraded from "Describe this image in detail." to the
-  three-element template. Measured on the same Chinese-text screenshot: the old
-  construction produced a hallucinated repetition loop; the new one transcribes
-  the full Chinese body verbatim. Also safe for cloud vision models (gpt-4o
-  etc.); lower temperature has no downside for transcription tasks.
-- Addition (same file, same section): `image_analyze` now marks truncation
-  explicitly — when `finish_reason == "length"` the result JSON gains
-  `"truncated": true`, so the main model knows the transcription is incomplete
-  (text-dense image scenario) instead of silently summarizing partial content.
+> Status: integrated into `pinvou3-clean-v0.9.6` (`e7bda367b` + `944a844a2`).
+> See the Chinese canonical document §6 for the full v0.9.6 upgrade record.
+
+- `image_analyze` uses **streaming** (`stream: true`) with a total per-request
+  budget of **90s** (configurable via `request_timeout_secs`), measured from
+  before `send()` so waiting for response headers is bounded too; on timeout
+  the accumulated partial content is returned with a `truncated` marker instead
+  of failing the whole request into a retry loop.
+- **Limited retry**: only HTTP 429/499/5xx (max 2 retries, 1s→2s backoff,
+  `Retry-After` honored up to 10s); timeouts and network errors never retry.
+- Streaming robustness: byte-buffered SSE line splitting (no cross-chunk UTF-8
+  corruption), mid-stream read errors return partial content + `truncated`,
+  and a response with no SSE events and empty content is reported as an error
+  (distinguishes "endpoint ignored `stream`" from "empty image").
+- `VisionModelConfig` gained six optional fields (`system_prompt`,
+  `default_prompt`, `max_output_tokens`, `temperature`,
+  `request_timeout_secs`, `stream`), all `None`-fallback to prior behavior.
+  Prompts and `temperature: 0.2` are now injected by the app layer
+  (`bridge.rs`); the fork delta shrinks to mechanism only.
 
 ## Topics
 

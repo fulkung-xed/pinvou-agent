@@ -46,6 +46,15 @@ import {
   parseLooseJson,
 } from '../conversation/structured-assistant-content.js';
 import {
+  FLOATING_VOICE_CLICK_SUPPRESSION_MS,
+  canStartFloatingVoiceDrag,
+  clearFloatingVoiceDragClick,
+  consumeFloatingVoiceDragClick,
+  createFloatingVoiceDragSession,
+  finishFloatingVoiceDrag,
+  moveFloatingVoiceDrag,
+} from './floating-voice-drag.mjs';
+import {
   createPinvouModeScopeKey,
   loadPinvouModeState,
   reducePinvouModeState,
@@ -541,8 +550,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const chatRootRef = useRef(null);
       const composerRef = useRef(null);
       const floatingVoiceRef = useRef(null);
-      const voiceDragRef = useRef({ timer: null, dragging: false, suppressClick: false, pointerId: null, offsetX: 0, offsetY: 0 });
+      const voiceDragRef = useRef(null);
+      const voiceDragClickResetRef = useRef(null);
       const [floatingVoicePos, setFloatingVoicePos] = useState(null);
+      const [floatingVoicePressed, setFloatingVoicePressed] = useState(false);
       useEffect(() => {
         if (!focusComposerTick) return undefined;
         const timer = window.setTimeout(() => {
@@ -1219,8 +1230,31 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, []);
 
       useEffect(() => {
+        const finishFromWindow = (event) => {
+          finishFloatingVoicePointer(event.pointerId, event, true, event.type);
+        };
+        const finishOnBlur = () => {
+          const drag = voiceDragRef.current;
+          if (drag && drag.pointerId !== null) finishFloatingVoicePointer(drag.pointerId, null, true, 'blur');
+        };
+        window.addEventListener('pointerup', finishFromWindow, true);
+        window.addEventListener('pointercancel', finishFromWindow, true);
+        window.addEventListener('blur', finishOnBlur);
         return () => {
-          if (voiceDragRef.current.timer) clearTimeout(voiceDragRef.current.timer);
+          window.removeEventListener('pointerup', finishFromWindow, true);
+          window.removeEventListener('pointercancel', finishFromWindow, true);
+          window.removeEventListener('blur', finishOnBlur);
+          if (voiceDragClickResetRef.current) window.clearTimeout(voiceDragClickResetRef.current);
+          const drag = voiceDragRef.current;
+          if (drag && drag.pointerId !== null) {
+            const pointerId = drag.pointerId;
+            const target = drag.target;
+            finishFloatingVoiceDrag(drag, pointerId);
+            try {
+              if (target && target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+            } catch (_) {}
+          }
+          voiceDragRef.current = null;
         };
       }, []);
 
@@ -1396,11 +1430,53 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (bridge.available) bridge.chat.cancelGeneration();
       }
 
-      function handleVoiceClick() {
-        if (voiceDragRef.current.suppressClick) {
-          voiceDragRef.current.suppressClick = false;
+      function finishFloatingVoicePointer(pointerId, event, releaseCapture, reason) {
+        const drag = voiceDragRef.current;
+        const target = drag && drag.target;
+        const result = finishFloatingVoiceDrag(drag, pointerId, {
+          suppressCompatibleClick: reason === 'pointerup' || reason === 'lostpointercapture' || reason === 'buttons-released',
+        });
+        if (!result.matched) return false;
+
+        setFloatingVoicePressed(false);
+        if (voiceDragClickResetRef.current) {
+          window.clearTimeout(voiceDragClickResetRef.current);
+          voiceDragClickResetRef.current = null;
+        }
+        if (drag.suppressClick) {
+          if (event && event.preventDefault) event.preventDefault();
+          voiceDragClickResetRef.current = window.setTimeout(() => {
+            if (voiceDragRef.current === drag) clearFloatingVoiceDragClick(drag);
+            voiceDragClickResetRef.current = null;
+          }, FLOATING_VOICE_CLICK_SUPPRESSION_MS);
+        }
+        if (releaseCapture) {
+          try {
+            if (target && target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+          } catch (_) {}
+        }
+        drag.target = null;
+        return true;
+      }
+
+      function handleFloatingVoiceClick(event) {
+        const nativeEvent = event.nativeEvent || event;
+        if (consumeFloatingVoiceDragClick(voiceDragRef.current, {
+          detail: nativeEvent.detail,
+          pointerId: nativeEvent.pointerId,
+          pointerType: nativeEvent.pointerType,
+        })) {
+          event.preventDefault();
+          if (voiceDragClickResetRef.current) {
+            window.clearTimeout(voiceDragClickResetRef.current);
+            voiceDragClickResetRef.current = null;
+          }
           return;
         }
+        handleVoiceClick();
+      }
+
+      function handleVoiceClick() {
         if (!bridge.available) return;
         if (voiceInput.status === 'requesting_permission') {
           bridge.voice.cancelVoiceInput();
@@ -1416,59 +1492,61 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
       function handleFloatingVoicePointerDown(e) {
         if (!tabletVoiceMode) return;
-        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const activeDrag = voiceDragRef.current;
+        if (activeDrag && activeDrag.pointerId !== null) return;
+        if (!canStartFloatingVoiceDrag(e)) return;
         const root = chatRootRef.current;
         const floater = floatingVoiceRef.current;
         if (!root || !floater) return;
-        if (voiceDragRef.current.timer) clearTimeout(voiceDragRef.current.timer);
-        const rootRect = root.getBoundingClientRect();
+        if (voiceDragClickResetRef.current) {
+          window.clearTimeout(voiceDragClickResetRef.current);
+          voiceDragClickResetRef.current = null;
+        }
         const floatRect = floater.getBoundingClientRect();
         const target = e.currentTarget;
-        const drag = {
-          timer: null,
-          dragging: false,
-          suppressClick: false,
+        const drag = createFloatingVoiceDragSession({
           pointerId: e.pointerId,
+          pointerType: e.pointerType,
+          clientX: e.clientX,
+          clientY: e.clientY,
           offsetX: e.clientX - floatRect.left,
           offsetY: e.clientY - floatRect.top,
-        };
+        });
+        drag.target = target;
         voiceDragRef.current = drag;
-        drag.timer = setTimeout(() => {
-          if (voiceDragRef.current !== drag) return;
-          drag.dragging = true;
-          drag.suppressClick = true;
-          setFloatingVoicePos(clampFloatingVoicePos(floatRect.left - rootRect.left, floatRect.top - rootRect.top));
-          try { target.setPointerCapture(e.pointerId); } catch (_) {}
-        }, 360);
+        setFloatingVoicePressed(true);
+        try { target.setPointerCapture(e.pointerId); } catch (_) {}
       }
 
       function handleFloatingVoicePointerMove(e) {
         const drag = voiceDragRef.current;
-        if (!drag.dragging || drag.pointerId !== e.pointerId) return;
+        const movement = moveFloatingVoiceDrag(drag, {
+          pointerId: e.pointerId,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          buttons: e.buttons,
+        });
+        if (movement.kind === 'released') {
+          finishFloatingVoicePointer(e.pointerId, e, true, 'buttons-released');
+          return;
+        }
+        if (movement.kind !== 'move') return;
         const root = chatRootRef.current;
         if (!root) return;
         e.preventDefault();
         const rootRect = root.getBoundingClientRect();
         setFloatingVoicePos(clampFloatingVoicePos(
-          e.clientX - rootRect.left - drag.offsetX,
-          e.clientY - rootRect.top - drag.offsetY
+          movement.x - rootRect.left,
+          movement.y - rootRect.top
         ));
       }
 
       function handleFloatingVoicePointerEnd(e) {
-        const drag = voiceDragRef.current;
-        if (drag.timer) {
-          clearTimeout(drag.timer);
-          drag.timer = null;
-        }
-        const wasDragging = drag.dragging && drag.pointerId === e.pointerId;
-        drag.dragging = false;
-        drag.pointerId = null;
-        if (wasDragging) {
-          e.preventDefault();
-          setTimeout(() => { drag.suppressClick = false; }, 120);
-        }
-        try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+        finishFloatingVoicePointer(e.pointerId, e, true, e.type);
+      }
+
+      function handleFloatingVoiceLostPointerCapture(e) {
+        finishFloatingVoicePointer(e.pointerId, e, false, 'lostpointercapture');
       }
 
       function handleClearInput() {
@@ -1693,12 +1771,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           {tabletVoiceMode && (
             <div ref={floatingVoiceRef} style={floatingVoiceStyle} className="absolute z-30 flex items-center gap-2">
               <button
-                onClick={handleVoiceClick}
+                onClick={handleFloatingVoiceClick}
                 onPointerDown={handleFloatingVoicePointerDown}
                 onPointerMove={handleFloatingVoicePointerMove}
                 onPointerUp={handleFloatingVoicePointerEnd}
                 onPointerCancel={handleFloatingVoicePointerEnd}
+                onLostPointerCapture={handleFloatingVoiceLostPointerCapture}
                 disabled={primaryVoiceDisabled}
+                data-testid="floating-voice-button"
+                data-pressed={floatingVoicePressed ? 'true' : 'false'}
                 aria-label={primaryVoiceLabel}
                 title={primaryVoiceLabel}
                 className={`w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-xl backdrop-blur-2xl touch-none select-none ${
@@ -1709,7 +1790,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       : voiceInput.status === 'failed'
                         ? (isDark ? 'bg-[#3A1F1F] text-[#F28B82] hover:bg-[#4A2525]' : 'bg-[#FCE8E6] text-[#C5221F] hover:bg-[#FAD2CF]')
                         : (isDark ? 'bg-[#A8C7FA] text-[#062E6F] hover:bg-[#D3E3FD]' : 'bg-[#0B57D0] text-white hover:bg-[#0842A0] shadow-blue-500/25')
-                } ${primaryVoiceDisabled ? 'opacity-80' : 'active:scale-95'}`}>
+                } ${primaryVoiceDisabled ? 'opacity-80' : ''} ${floatingVoicePressed ? 'scale-95' : ''}`}>
                 {voiceRecording ? <StopCircle size={26} /> : <Mic size={26} />}
               </button>
               {hasDraftText && (
@@ -2039,7 +2120,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               <div className="flex items-center justify-between mt-1.5 gap-2">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <ComposerAttachButton t={t} compact={composerCompact} />
-                  <button onClick={handleVoiceClick} disabled={primaryVoiceDisabled} aria-label={primaryVoiceLabel} title={primaryVoiceLabel}
+                  <button onClick={handleVoiceClick} disabled={primaryVoiceDisabled} data-testid="composer-voice-button" aria-label={primaryVoiceLabel} title={primaryVoiceLabel}
                     className={`${
                       voiceRecording
                         ? 'w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors bg-[#C5221F] text-white hover:bg-[#A50E0E] border border-transparent'
@@ -2082,12 +2163,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 </>
               )}
             </div>
-            {ctxTokens && ctxTokens.input > 0 && (
+            {ctxTokens && ctxTokens.max > 0 && (
               <div className={`mt-1.5 px-5 text-[11px] font-mono ${
-                ctxPct >= 0.9 ? (isDark ? 'text-[#F28B82]' : 'text-[#C5221F]')
-                : ctxPct >= 0.75 ? (isDark ? 'text-[#F9AB00]' : 'text-[#B06000]')
-                : (isDark ? 'text-[#5F6368]' : 'text-[#9AA0A6]')}`}>
-                {t.ctxUsage} {fmtCtxTok(ctxTokens.input)} / {fmtCtxTok(ctxTokens.max)} · {Math.round(ctxPct * 100)}%
+                ctxPct >= 0.9 ? 'text-[#C5221F] dark:text-[#F28B82]'
+                : ctxPct >= 0.75 ? 'text-[#B06000] dark:text-[#F9AB00]'
+                : 'text-[#9AA0A6] dark:text-[#5F6368]'}`}>
+                {t.ctxUsage} {ctxTokens.input > 0 ? fmtCtxTok(ctxTokens.input) : '—'} / {fmtCtxTok(ctxTokens.max)} · {Math.round(ctxPct * 100)}%
               </div>
             )}
             <div className="flex items-center justify-center mt-3">
@@ -2477,8 +2558,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     : (isDark ? 'bg-[#004A77] text-[#E3E3E3]' : 'bg-[#D3E3FD] text-[#1F1F1F]')
                 }`} />
               <div className="flex gap-2 justify-end mt-1">
-                <button className={cardBtnCls(isDark)} onClick={() => { setEditing(false); setVal(item.text); }}>{t.cpCancel}</button>
-                <button className={cardBtnCls(isDark, 'primary')} onClick={commit}>{t.resend}</button>
+                <button className={cardBtnCls()} onClick={() => { setEditing(false); setVal(item.text); }}>{t.cpCancel}</button>
+                <button className={cardBtnCls('primary')} onClick={commit}>{t.resend}</button>
               </div>
             </div>
           </div>

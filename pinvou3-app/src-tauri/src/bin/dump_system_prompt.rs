@@ -80,6 +80,14 @@ fn main() -> Result<()> {
         Some("agent") => (AppMode::Agent, ApprovalMode::Suggest),
         _ => (AppMode::Yolo, ApprovalMode::Auto),
     };
+
+    // CodeWhale 的原生记忆装配已收口到 Engine 内部。Pinvou 当前明确关闭该能力；
+    // 若未来启用，必须先为此诊断工具提供与 Engine 等价的公开装配入口，避免静默漏项。
+    anyhow::ensure!(
+        !cfg.memory_enabled,
+        "dump_system_prompt 尚不支持 CodeWhale 原生记忆，请先同步 Engine 的公开 prompt 装配入口"
+    );
+
     let prompt = prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
         &cfg.workspace,
         None,

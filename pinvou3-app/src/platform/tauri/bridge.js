@@ -817,6 +817,7 @@
   var untrackArtifact = artifactTrackerFeature.untrackArtifact;
   var findPresentedArtifact = artifactTrackerFeature.findPresentedArtifact;
   var reconcileArtifacts = artifactTrackerFeature.reconcileArtifacts;
+  var extractArtifactPaths = artifactTrackerFeature.extractArtifactPaths;
   var extractArtifactPath = artifactTrackerFeature.extractArtifactPath;
   var fileMutationAction = artifactTrackerFeature.fileMutationAction;
   var isPresentArtifactTool = artifactTrackerFeature.isPresentArtifactTool;
@@ -866,6 +867,7 @@
   var hasChatItemForTool = chatFeature.hasChatItemForTool;
   var isDuplicateArtifactCard = chatFeature.isDuplicateArtifactCard;
   var addSystemItem = chatFeature.addSystemItem;
+  var addAuthoritySyncNotice = chatFeature.addAuthoritySyncNotice;
   var compactPruneRollupText = chatFeature.compactPruneRollupText;
   var removeCompactionStartItem = chatFeature.removeCompactionStartItem;
   var addOrMergePruneCompaction = chatFeature.addOrMergePruneCompaction;
@@ -1796,7 +1798,7 @@
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
-    addChatItem: addChatItem, addSystemItem: addSystemItem, timeStr: timeStr,
+    addChatItem: addChatItem, addSystemItem: addSystemItem, addAuthoritySyncNotice: addAuthoritySyncNotice, timeStr: timeStr,
     toolCallAlreadyStarted: toolCallAlreadyStarted,
     toolCallAlreadyFinished: toolCallAlreadyFinished,
     hasChatItemForTool: hasChatItemForTool,
@@ -1819,7 +1821,7 @@
     artifactPathFromToolOutput: artifactPathFromToolOutput,
     shouldUseToolOutputAsArtifact: shouldUseToolOutputAsArtifact,
     presentArtifactAbsPath: presentArtifactAbsPath,
-    extractArtifactPath: extractArtifactPath, fileMutationAction: fileMutationAction,
+    extractArtifactPaths: extractArtifactPaths, extractArtifactPath: extractArtifactPath, fileMutationAction: fileMutationAction,
     markTurnDirtyArtifact: markTurnDirtyArtifact,
     trackArtifact: trackArtifact, untrackArtifact: untrackArtifact,
     findPresentedArtifact: findPresentedArtifact, isDeliverable: isDeliverable,
@@ -1911,7 +1913,7 @@
 
   var interactionFeature = installBridgeFeature("interaction", {
     state: state, invoke: invoke, notify: notify, bt: bt,
-    addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr,
+    addSystemItem: addSystemItem, addAuthoritySyncNotice: addAuthoritySyncNotice, addChatItem: addChatItem, timeStr: timeStr,
     runSyncOnSession: runSyncOnSession,
     flushAssistantMessageToHistory: flushAssistantMessageToHistory,
     resetPendingAssistant: resetPendingAssistant,
@@ -2047,6 +2049,7 @@
   var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
+  var cancelKbModel = knowledgeModelFeature.cancelKbModel;
   var llamaEngineFeature = installBridgeFeature("llama-engine", { state: state, notify: notify, invoke: invoke });
   var llamaEngineRefreshStatus = llamaEngineFeature.refreshStatus;
   var llamaEngineInstallEngine = llamaEngineFeature.installEngine;
@@ -2054,7 +2057,6 @@
   var llamaEngineCancelDownload = llamaEngineFeature.cancelDownload;
   var llamaEngineStart = llamaEngineFeature.startEngine;
   var llamaEngineStop = llamaEngineFeature.stopEngine;
-  var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;

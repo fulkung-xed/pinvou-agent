@@ -17,6 +17,7 @@ import {
   presetOptionsI18n, presetProviderLabel,
   normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel,
   groupModelsForSelector, selectorMainLabel, selectorSubLabel,
+  reasoningEffortTiersForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
 } from './model-catalog.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import {
@@ -534,9 +535,32 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
       const effectiveId = currentSessionModelId || activeModelId;
       const current = savedModels.find(m => m.id === effectiveId);
+      const reasoningEffortTiers = current ? (reasoningEffortTiersForModel(current) || []) : [];
+      // 存量档位（可能保存过底座归一前的旧值，如 deepseek 的 medium）先归一到
+      // 档位表内等价档位再高亮，避免「档位表不含该值 → 下拉无高亮」。
+      const reasoningEffortValue = current ? normalizeStoredReasoningEffort(current, current.reasoning_effort) : null;
+      const [effortSaveError, setEffortSaveError] = useState('');
+      function setReasoningEffortForCurrent(tier) {
+        if (!current) return;
+        if (tier === reasoningEffortValue) return;
+        setEffortSaveError('');
+        const next = { ...current, reasoning_effort: tier };
+        if (!bridge.available) { setOpen(false); return; }
+        // 保存成功才收弹层；失败保留弹层以便展示 effortSaveError（否则错误渲染
+        // 在已关闭的 popover 内不可达）。
+        bridge.models.saveModel(next)
+          .then(() => { setOpen(false); setEffortSaveError(''); })
+          .catch((error) => {
+            const message = (error && error.message)
+              ? error.message
+              : ((t && t.saveModelFailed) || '保存失败');
+            setEffortSaveError(message);
+          });
+      }
       if (!savedModels.length) return null;
       function pick(id) {
         setOpen(false);
+        setEffortSaveError('');
         if (id === effectiveId) return;
         if (onSwitchModel) { onSwitchModel(activeSessionId, id); return; }
         if (bridge.available) bridge.models.switchModel(activeSessionId, id);
@@ -589,6 +613,29 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                     </>
                   );
                 })()}
+                {current && reasoningEffortTiers.length > 0 && (
+                  <>
+                    <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
+                    <div className="px-3 pt-1 pb-1">
+                      <div className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 mb-1.5">{t.thinkingDepth}</div>
+                      <div className="flex flex-wrap gap-1">
+                        {reasoningEffortTiers.map(tier => (
+                          <button key={tier} onClick={() => setReasoningEffortForCurrent(tier)}
+                            className={`h-7 min-w-[48px] px-2.5 rounded-full text-[12px] font-medium transition-colors ${
+                              reasoningEffortValue === tier
+                                ? 'bg-[#007AFF] text-white'
+                                : 'bg-black/[0.05] dark:bg-white/[0.08] text-gray-600 dark:text-gray-300 hover:bg-black/[0.09] dark:hover:bg-white/[0.13]'
+                            }`}>
+                            {t.thinkingDepthTiers[tier] || tier}
+                          </button>
+                        ))}
+                      </div>
+                      {effortSaveError && (
+                        <div className="mt-1.5 text-[11px] leading-4 text-[#FF3B30] dark:text-[#FF6B6B]">{effortSaveError}</div>
+                      )}
+                    </div>
+                  </>
+                )}
                 {canMultiAgent && (
                   <>
                     <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
@@ -1211,6 +1258,12 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
+      // 思考深度档位：初始取已保存值（先归一——存量可能是底座归一前的旧值，
+      // 如 deepseek 的 medium），无则按模型默认（vllm→off，其余→high；
+      // 底座不支持的模型无默认，保持 null = 未显式设置，避免保存时污染 SavedModel）。
+      const [reasoningEffort, setReasoningEffort] = useState(
+        normalizeStoredReasoningEffort(initial, initial.reasoning_effort)
+      );
       const [apiKey, setApiKey] = useState('');
       const [keyAction, setKeyAction] = useState(initial.__new ? 'replace' : 'keep_existing');
       const [showKey, setShowKey] = useState(false);
@@ -1227,12 +1280,21 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const [localDetecting, setLocalDetecting] = useState(false);
       const [localDetectResult, setLocalDetectResult] = useState(null);
       // 图片输入能力三档(auto/enabled/disabled)与兜底视觉模型引用(阶段 G 设置页控件)。
+      const [imageCapability, setImageCapability] = useState(initial.image_capability_override || 'auto');
       // 视觉模型:显式选「本地识图引擎」时用前端局部哨兵 '__local_engine__'(不落盘,
       // doSave 转 vision_prefer_local_engine);否则用 vision_model_id。
-      const [imageCapability, setImageCapability] = useState(initial.image_capability_override || 'auto');
       const [visionModelId, setVisionModelId] = useState(
         initial.vision_prefer_local_engine ? '__local_engine__' : (initial.vision_model_id || ''));
       const [imageCapabilityPickerOpen, setImageCapabilityPickerOpen] = useState(false);
+      // 「自动探测」保存时按钮转「正在探测图片能力…」,探测随保存完成、弹窗直接关闭。
+      const [savingModel, setSavingModel] = useState(false);
+      // 「保存时检测」检测到明确不支持时的待决策信号(ImageProbeOutcome);
+      // 非空时弹窗保持,给出再次检测/去配置视觉模型/直接保存(自动处理)三选一。
+      const [probeDecision, setProbeDecision] = useState(null);
+      // 视觉模型选择探测:选中模型必须先通过图片识别探测——探测中列表保持
+      // 展开、该行右侧显示忙转圈;通过后收起列表选中,未通过则拒绝并提示排查。
+      const [visionProbingKey, setVisionProbingKey] = useState(null);
+      const [visionProbeError, setVisionProbeError] = useState(null);
       const [visionModelPickerOpen, setVisionModelPickerOpen] = useState(false);
       // 测试图片能力(设计 §7.3):仅主动点击触发;表单关键值变化后上一次结果不再可信,清除。
       const [imageTesting, setImageTesting] = useState(false);
@@ -1252,6 +1314,8 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         ? localizeProvider(CLOUD_MODEL_PROVIDERS.find(group => group.key === providerKey) || findCloudProviderForModel({ preset, model, base_url: baseUrl, provider_kind: providerKind, vendor }) || null)
         : null;
       const isCodingPlan = providerKind === PROVIDER_KIND_CODING_PLAN || (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN);
+      // 当前表单模型可切换的思考深度档位（底座不支持的模型为空 = 不提供切换）。
+      const reasoningEffortTiers = reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || [];
       function normalizeConnectionTestResult(value, isCodingPlanProvider) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
           const code = String(value.code || (value.ok ? 'ok' : 'unknown'));
@@ -1304,6 +1368,9 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : item.title));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
         setMaxOutput(p === 'local_vllm' ? '24576' : '');
+        // 换目录项时重置思考深度到该模型的默认档位（vllm→off，其余→high；
+        // 无档位模型置 null = 未显式设置）。带上 nextBaseUrl 以按新 route 判定档位。
+        setReasoningEffort(reasoningEffortForModelSwitch({ preset: p, model: nextModel, vendor: group.vendor || vendor, base_url: nextBaseUrl }));
         if (p !== 'local_vllm') {
           setApiKey('');
           setKeyAction(initial.__new ? 'replace' : 'keep_existing');
@@ -1314,6 +1381,23 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         setCustomModel(!!item.custom);
         setProviderModelPickerOpen(false);
         setPickerOpen(false);
+      }
+      // 手输编辑会改变 reasoning-effort route 的字段（model ID / base_url）后，把思考
+      // 深度归一到新 route：仍在档位表内的值保留（不覆盖用户有效选择，如 vLLM 的 high、
+      // 非 K3 moonshot 的 off），不在档位表内的按底座真实等价值回落（如 K3 的 off→low、
+      // medium→high，或 openai_compatible 改到官方 deepseek 端点后档位从无到有 → 默认
+      // high）。与目录选择（chooseModel / applyCatalogItem）的「重置到默认」区分：目录
+      // 选择是显式换模型，手输是改字段，保留有效值更符合直觉且不会误清用户的旧选择。
+      function renormalizeReasoningEffort(modelDescriptor) {
+        setReasoningEffort(normalizeStoredReasoningEffort(modelDescriptor, reasoningEffort));
+      }
+      function handleModelIdChange(value) {
+        setModel(value);
+        renormalizeReasoningEffort({ preset, model: value, vendor, base_url: baseUrl });
+      }
+      function handleBaseUrlChange(value) {
+        setBaseUrl(value);
+        renormalizeReasoningEffort({ preset, model, vendor, base_url: value });
       }
       async function handleTest() {
         if (!bridge.available) return;
@@ -1331,7 +1415,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       // 凭据优先用新填的 key,否则由后端按 model_id 读已保存凭据。
       function normalizeImageCapabilityTestResult(value) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
-          const status = ['supported', 'unsupported', 'error'].includes(value.status) ? value.status : 'error';
+          const status = ['supported', 'unsupported', 'unverified', 'error'].includes(value.status) ? value.status : 'error';
           return { status, verified: !!value.verified, summary: value.summary ? String(value.summary) : '' };
         }
         return { status: 'error', verified: false, summary: String(value || '') };
@@ -1449,8 +1533,11 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         }
         setShowKey(nextVisible);
       }
-      function doSave() {
-        if (!canSave) return;
+      // 「保存时检测」流程:检测支持 → 直接回填关闭;检测明确不支持 →
+      // 弹窗保持并给出三选一(再次检测/去配置视觉模型/直接保存落自动处理);
+      // error/连接不通 → 已落「自动处理」,直接关闭。
+      async function doSave(skipProbe) {
+        if (!canSave || savingModel) return;
         const id = initial.__new ? ('m_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)) : initial.id;
         const contextTokens = Number.parseInt(contextWindow, 10);
         const outputTokens = Number.parseInt(maxOutput, 10);
@@ -1460,22 +1547,88 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         const nextApiKey = isLocalPreset
           ? (localKeyEnabled && apiKey.trim() ? apiKey.trim() : '')
           : (!isLocalPreset && apiKey.trim() ? apiKey.trim() : '');
-        onSave({
-          id: id, name: saveName, preset: preset,
-          context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
-          max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
-          model: model.trim(), base_url: baseUrl.trim(),
-          api_key: nextApiKey, credential_action: nextKeyAction,
-          provider_kind: providerKind || null,
-          vendor: vendor || null,
-          endpoint_mode: endpointMode || null,
-          // 图片能力/视觉模型(阶段 G):选了自身等同未配置;
-          // 「本地识图引擎」是前端局部哨兵(不落盘),保存时转 vision_prefer_local_engine,
-          // 与 vision_model_id 互斥(后端 save_model 另有归一兜底)。
-          image_capability_override: imageCapability || 'auto',
-          vision_prefer_local_engine: visionModelId === '__local_engine__',
-          vision_model_id: visionModelId && visionModelId !== '__local_engine__' && visionModelId !== id ? visionModelId : null,
-        });
+        setSavingModel(true);
+        try {
+          const outcome = await onSave({
+            id: id, name: saveName, preset: preset,
+            context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
+            max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
+            // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
+            reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
+            model: model.trim(), base_url: baseUrl.trim(),
+            api_key: nextApiKey, credential_action: nextKeyAction,
+            provider_kind: providerKind || null,
+            vendor: vendor || null,
+            endpoint_mode: endpointMode || null,
+            // 图片能力/视觉模型(阶段 G):选了自身等同未配置。
+            // 用户「直接保存(自动处理)」时带 pinvou 档且不再检测。
+            image_capability_override: skipProbe ? 'pinvou' : (imageCapability || 'auto'),
+            // 「本地识图引擎」是前端局部哨兵(不落盘),保存时转 vision_prefer_local_engine,
+            // 与 vision_model_id 互斥(后端 save_model 兜底归一)。
+            vision_prefer_local_engine: visionModelId === '__local_engine__',
+            vision_model_id: visionModelId && visionModelId !== '__local_engine__' && visionModelId !== id ? visionModelId : null,
+            // 「保存时检测」档:后端在保存时检测连接+识图,按结果回填。
+            probe_image_capability: !skipProbe && imageCapability === 'auto',
+          });
+          const probe = outcome && outcome.image_probe;
+          if (probe && (probe.status === 'unsupported' || probe.status === 'unverified')) {
+            // 明确不支持:不落盘,弹窗保持,交用户决策。
+            setProbeDecision(probe);
+          } else {
+            // supported 已回填 / error/unknown 已落自动处理 / 无检测:直接关闭。
+            onCancel();
+          }
+        } catch (e) {
+          // 保存失败与既有行为一致:关闭弹窗,错误由调用链处理。
+          onCancel();
+        } finally {
+          setSavingModel(false);
+        }
+      }
+      // 视觉模型选择:一律识图探测(无表内加速)——识别出测试图(supported)
+      // 才收起列表并选中;未通过则列表保持展开、该模型被拒绝并提示排查,
+      // 用户可继续选择其他模型。
+      async function handleVisionModelChoose(key) {
+        if (visionProbingKey) return; // 探测中忽略其他点击
+        setVisionProbeError(null);
+        if (!key) {
+          setVisionModelId('');
+          setVisionModelPickerOpen(false);
+          return;
+        }
+        // 「本地识图引擎」哨兵不经云端探测:能力由引擎运行态保证,直接选中。
+        if (key === '__local_engine__') {
+          setVisionModelId(key);
+          setVisionModelPickerOpen(false);
+          return;
+        }
+        const candidate = visionCandidates.find(item => item.id === key);
+        if (!candidate || !bridge.available || !bridge.models.testImageInputCapability) {
+          setVisionModelId(key);
+          setVisionModelPickerOpen(false);
+          return;
+        }
+        setVisionProbingKey(key); // 列表保持展开,该行右侧显示忙转圈
+        try {
+          const result = await bridge.models.testImageInputCapability(
+            candidate.model || candidate.name || '',
+            candidate.base_url || '',
+            '',
+            candidate.id,
+          );
+          if (result && result.status === 'supported') {
+            setVisionModelId(key);
+            setVisionModelPickerOpen(false); // 成功按最终结果收起列表
+          } else {
+            setVisionProbeError(settingsCopy.visionModelProbeError(
+              result && result.summary ? result.summary : ''));
+          }
+        } catch (e) {
+          setVisionProbeError(settingsCopy.visionModelProbeError(
+            String(e && e.message ? e.message : e)));
+        } finally {
+          setVisionProbingKey(null);
+        }
       }
       function makeModelId() {
         return 'm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -1540,6 +1693,11 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         setLocalKeyEnabled(false);
         setCustomModel(true);
         setPickerOpen(false);
+        // 本地模型 → 手动添加是显式切换 route：丢弃草稿残留的思考深度，回落到 vLLM
+        // 默认 off（防 SSE timeout）。否则新建 DeepSeek 草稿初始化的 high 会被当成
+        // 合法 vLLM 档位保留，保存时显式写入 reasoning_effort=high，绕过桥接层
+        // 「vllm→off」的默认约束。与 applyCatalogItem / chooseModel 的切换语义一致。
+        setReasoningEffort(reasoningEffortForModelSwitch({ preset: 'local_vllm', model: '', vendor, base_url: defs.baseUrl }));
       }
       const catalogSectionTitleClass = `px-1 mb-2 text-[12px] leading-4 font-semibold ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`;
       const catalogGroupClass = `overflow-hidden rounded-[16px] ${isDark ? 'bg-[#2C2C2E]' : 'bg-[#F2F2F7]'}`;
@@ -1552,6 +1710,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         const selectedItem = known ? items.find(item => !item.custom && item.model === model) : null;
         const selectedLabel = customModel || !known ? `${settingsCopy.customModel} ID` : ((selectedItem && selectedItem.title) || model);
         const chooseModel = (item) => {
+          const nextModel = (!item || item.custom) ? '' : item.model;
           if (!item || item.custom) {
             setCustomModel(true);
             setModel('');
@@ -1561,6 +1720,9 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
             setModel(item.model);
             if (!nameTouched) setName(item.title || item.model);
           }
+          // 同一 provider 内换模型时重置思考深度到新模型的默认档位：K2.6 选 off 后切 K3
+          // 会残留不在 K3 档位表内的 off，界面无高亮且保存仍写旧值；与 applyCatalogItem 一致。
+          setReasoningEffort(reasoningEffortForModelSwitch({ preset, model: nextModel, vendor, base_url: baseUrl }));
           setProviderModelPickerOpen(false);
         };
         return (
@@ -1603,7 +1765,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
             {(customModel || !known) && renderInlineField({
               label: settingsCopy.modelId,
               value: model,
-              onChange: e => setModel(e.target.value),
+              onChange: e => handleModelIdChange(e.target.value),
               placeholder: isCodingPlan ? t.uiSettingsView.codingPlanModelIdPlaceholder : settingsCopy.modelIdPlaceholder,
             })}
           </>
@@ -1753,17 +1915,23 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       };
       // 图片输入能力 + 兜底视觉模型(阶段 G):与发送时后端复核同一组 SavedModel 字段。
       const imageCapabilityOptions = [
+        // 自动探测(auto):保存时探测连接+识图并回填;能(enabled)/不能(disabled):
+        // 人工钉死;pinvou 决策(pinvou):内置已验证表判断,不探测。
         { key: 'auto', label: settingsCopy.imageCapabilityAuto },
         { key: 'enabled', label: settingsCopy.imageCapabilityEnabled },
         { key: 'disabled', label: settingsCopy.imageCapabilityDisabled },
+        { key: 'pinvou', label: settingsCopy.imageCapabilityPinvou },
       ];
+      // 视觉兜底候选:显示除当前模型外的全部模型,不做能力过滤——选择时
+      // 一律识图探测,supported 才允许选中(探测是唯一闸门;disabled 可能是
+      // 历史探测误判残留,不应隐藏,如 kimi-for-coding)。
       const visionCandidates = (models || []).filter(item => item && item.id && item.id !== initial.id);
       // 第一项为「本地识图引擎」(前端局部哨兵,选中转 vision_prefer_local_engine),
       // 其次「无」与各云端视觉模型。
       const visionOptions = [{ key: '__local_engine__', label: settingsCopy.llamaEngine.localEngineOption }]
         .concat([{ key: '', label: settingsCopy.visionModelNone }])
         .concat(visionCandidates.map(item => ({ key: item.id, label: item.name || item.model })));
-      const renderPickerRow = ({ testId, label, value, options, currentKey, open, onToggle, onChoose }) => (
+      const renderPickerRow = ({ testId, label, value, options, currentKey, open, onToggle, onChoose, probingKey, probeError }) => (
         <>
           <button
             type="button"
@@ -1782,19 +1950,29 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
             <div className={`border-b last:border-b-0 ${formDivider}`}>
               {options.map(option => {
                 const active = option.key === currentKey;
+                const probing = probingKey === option.key;
                 return (
                   <button
                     type="button"
                     data-testid={`${testId}-option-${option.key || 'none'}`}
                     key={option.key || '__none__'}
                     onClick={() => onChoose(option.key)}
-                    className={`w-full min-h-[50px] flex items-center gap-3 pl-7 pr-4 py-2.5 text-left border-b last:border-b-0 ${isDark ? 'border-white/[0.08] hover:bg-white/[0.06]' : 'border-black/[0.08] hover:bg-black/[0.035]'}`}
+                    disabled={probingKey ? !probing : false}
+                    className={`w-full min-h-[50px] flex items-center gap-3 pl-7 pr-4 py-2.5 text-left border-b last:border-b-0 ${isDark ? 'border-white/[0.08] hover:bg-white/[0.06]' : 'border-black/[0.08] hover:bg-black/[0.035]'} ${probing ? 'opacity-70' : ''}`}
                   >
                     <span className={`min-w-0 flex-1 text-[14px] leading-5 truncate ${active ? (isDark ? 'text-[#64B5F6]' : 'text-[#007AFF]') : (isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]')}`}>{option.label}</span>
-                    {active && <Check size={17} strokeWidth={2.4} className={isDark ? 'text-[#64B5F6]' : 'text-[#007AFF]'} />}
+                    {probing ? (
+                      <span data-testid={`${testId}-probing`} className="shrink-0 flex items-center gap-1.5 text-[12px] leading-4 text-[#0A84FF]">
+                        <RefreshCw size={13} className="animate-spin" />
+                        {settingsCopy.visionModelProbing}
+                      </span>
+                    ) : active ? <Check size={17} strokeWidth={2.4} className={isDark ? 'text-[#64B5F6]' : 'text-[#007AFF]'} /> : null}
                   </button>
                 );
               })}
+              {probeError && (
+                <div data-testid={`${testId}-probe-error`} className={`px-7 py-2.5 text-[12px] leading-4 border-b last:border-b-0 ${isDark ? 'text-[#FFD60A] border-white/[0.08]' : 'text-[#B25E00] border-black/[0.08]'}`}>{probeError}</div>
+              )}
             </div>
           )}
         </>
@@ -1803,6 +1981,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         const capabilityLabel = (imageCapabilityOptions.find(option => option.key === imageCapability) || imageCapabilityOptions[0]).label;
         const visionLabel = (visionOptions.find(option => option.key === visionModelId) || visionOptions[0]).label;
         // 结果文案:supported 附模型回复摘要;仅当结果为 supported 且档位为 auto 时提示可设「支持图片」。
+        // unverified(未识别出测试色 / 400 非图片拒绝)统一「原因未知」,不得宣称支持或不支持。
         const imageTestText = !imageTestResult
           ? settingsCopy.imageCapabilityTestHint
           : imageTestResult.status === 'supported'
@@ -1811,14 +1990,19 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
               + (imageCapability === 'auto' ? ` · ${settingsCopy.imageCapabilityTestEnableHint}` : '')
             : imageTestResult.status === 'unsupported'
               ? settingsCopy.imageCapabilityTestUnsupported + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '')
-              : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
+              : imageTestResult.status === 'unverified'
+                // 后端 summary 已自带「未能正确识别图像，原因未知」完整句,直接展示避免重复。
+                ? (imageTestResult.summary || settingsCopy.imageCapabilityTestUnverified)
+                : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
         const imageTestColor = !imageTestResult
           ? (isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]')
           : imageTestResult.status === 'supported'
             ? (isDark ? 'text-[#93D5A6]' : 'text-[#137333]')
             : imageTestResult.status === 'unsupported'
               ? (isDark ? 'text-[#FFD60A]' : 'text-[#FF9500]')
-              : 'text-[#FF3B30]';
+              : imageTestResult.status === 'unverified'
+                ? (isDark ? 'text-[#FFD60A]' : 'text-[#B25E00]')
+                : 'text-[#FF3B30]';
         return (
           <section>
             <div className={formGroup}>
@@ -1840,7 +2024,10 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                 currentKey: visionModelId,
                 open: visionModelPickerOpen,
                 onToggle: () => { setVisionModelPickerOpen(open => !open); setImageCapabilityPickerOpen(false); },
-                onChoose: key => { setVisionModelId(key); setVisionModelPickerOpen(false); },
+                onChoose: handleVisionModelChoose,
+                // 选择探测:探测中该行右侧显示忙转圈,未通过在该行下方提示排查。
+                probingKey: visionProbingKey,
+                probeError: visionProbeError,
               })}
             </div>
             <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.visionModelDesc}</div>
@@ -1957,7 +2144,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                       placeholder: settingsCopy.localModel,
                     })}
                     {showProviderModelField && renderProviderModelField()}
-                    {showModelIdField && !showProviderModelField && renderInlineField({ label: isLocalPreset ? settingsCopy.localModelId : settingsCopy.modelId, value: model, onChange: e => setModel(e.target.value), placeholder: isLocalPreset ? '' : settingsCopy.modelIdPlaceholder })}
+                    {showModelIdField && !showProviderModelField && renderInlineField({ label: isLocalPreset ? settingsCopy.localModelId : settingsCopy.modelId, value: model, onChange: e => handleModelIdChange(e.target.value), placeholder: isLocalPreset ? '' : settingsCopy.modelIdPlaceholder })}
                     {showCustomCloudKeyField && (
                       <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
                         <label className={`shrink-0 text-[14px] leading-5 ${isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]'}`}>API Key</label>
@@ -1967,7 +2154,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                         <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
                       </div>
                     )}
-                    {showBaseUrlField && renderInlineField({ label: t.customBaseUrl, value: baseUrl, onChange: e => setBaseUrl(e.target.value) })}
+                    {showBaseUrlField && renderInlineField({ label: t.customBaseUrl, value: baseUrl, onChange: e => handleBaseUrlChange(e.target.value) })}
                     {isLocalPreset && (
                       <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
                         <label className={`shrink-0 text-[14px] leading-5 ${isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]'}`}>{settingsCopy.apiKeyRequired}</label>
@@ -1992,6 +2179,29 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                 </section>
               )}
               {renderImageInputSection()}
+              {showConfigFields && reasoningEffortTiers.length > 0 && (
+                <section>
+                  <div className={formGroup}>
+                    <div className="min-h-[54px] flex items-center gap-3 px-4 py-2.5">
+                      <span className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.reasoningEffort}</span>
+                      <div className="ml-auto flex flex-wrap justify-end gap-1">
+                        {reasoningEffortTiers.map(tier => (
+                          <button
+                            key={tier}
+                            type="button"
+                            onClick={() => setReasoningEffort(tier)}
+                            className={`h-7 min-w-[52px] px-3 rounded-full text-[13px] font-medium transition-colors ${
+                              reasoningEffort === tier
+                                ? 'bg-[#007AFF] text-white dark:bg-[#0A84FF]'
+                                : 'bg-[#E5E5EA] text-[#636366] hover:bg-[#D9D9DE] dark:bg-white/[0.07] dark:text-[#C7C7CC] dark:hover:bg-white/[0.12]'
+                            }`}
+                          >{settingsCopy.reasoningEffortTiers[tier] || tier}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
               {showConfigFields && (
                 <section>
                   <div className={formGroup}>
@@ -2073,10 +2283,35 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                 </div>
               )}
             </div>
+            {/* 「保存时检测」明确不支持:弹窗保持,交用户决策。 */}
+            {probeDecision && (
+              <div data-testid="image-probe-decision" className={`px-5 py-3 border-t ${formDivider}`}>
+                <div className={`text-[13px] leading-5 ${isDark ? 'text-[#FFD60A]' : 'text-[#B25E00]'}`}>
+                  {settingsCopy.imageCapabilityDecisionTitle}
+                  {probeDecision.summary ? `：${probeDecision.summary}` : ''}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button data-testid="image-probe-retest" onClick={() => { setProbeDecision(null); doSave(); }}
+                    className={`h-8 px-3 rounded-full text-[13px] font-medium ${isDark ? 'bg-[#0A84FF]/20 text-[#0A84FF]' : 'bg-[#007AFF]/10 text-[#007AFF]'}`}>
+                    {settingsCopy.imageCapabilityDecisionRetest}
+                  </button>
+                  <button data-testid="image-probe-configure-vision" onClick={() => setProbeDecision(null)}
+                    className={`h-8 px-3 rounded-full text-[13px] font-medium ${isDark ? 'bg-white/[0.08] text-[#C7C7CC]' : 'bg-[#E5E5EA] text-[#636366]'}`}>
+                    {settingsCopy.imageCapabilityDecisionConfigureVision}
+                  </button>
+                  <button data-testid="image-probe-save-auto" onClick={() => { setProbeDecision(null); doSave(true); }}
+                    className={`h-8 px-3 rounded-full text-[13px] font-medium ${isDark ? 'bg-white/[0.08] text-[#C7C7CC]' : 'bg-[#E5E5EA] text-[#636366]'}`}>
+                    {settingsCopy.imageCapabilityDecisionSaveAuto}
+                  </button>
+                </div>
+              </div>
+            )}
             <div className={`flex justify-end gap-2 px-5 py-4 border-t ${formDivider}`}>
               <button data-testid="model-form-cancel" onClick={onCancel} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors ${isDark ? 'text-[#0A84FF] hover:bg-white/[0.06]' : 'text-[#007AFF] hover:bg-black/[0.04]'}`}>{t.cpCancel}</button>
-              <button onClick={doSave} disabled={!canSave}
-                className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">{t.modelSaveBtn}</button>
+              <button data-testid="model-form-save" onClick={() => doSave()} disabled={!canSave || savingModel}
+                className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">
+                {savingModel ? settingsCopy.imageCapabilitySaving : t.modelSaveBtn}
+              </button>
             </div>
           </div>
         </div>
@@ -2935,6 +3170,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         );
       };
       const renderContent = () => {
+      const renderContent = () => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
@@ -3110,7 +3346,8 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           {canManageModels && editingModel && (
             <ModelFormModal isDark={isDark} t={t} initial={editingModel} bs={bs} models={userModels}
               onCancel={() => setEditingModel(null)}
-              onSave={m => { onSaveModel(m); setEditingModel(null); }} />
+              // 保存/探测结果由弹窗内部控制关闭(自动探测有结论时保持打开展示)。
+              onSave={async m => onSaveModel(m)} />
           )}
           {modelDeleteConfirm && <ModelDeleteDialog model={modelDeleteConfirm} />}
           {searchDeleteConfirm && <SearchDeleteDialog source={searchDeleteConfirm} />}

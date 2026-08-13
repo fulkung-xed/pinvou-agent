@@ -66,6 +66,23 @@ impl ImageInputMode {
     }
 }
 
+/// Moonshot always-thinking 模型判定(bridge `moonshot_model_requires_explicit_thinking`
+/// 同一名单):这些模型官方接入要求 `thinking: {"type":"enabled"}` 保持开启,
+/// 省略该参数的请求会被网关拒绝。探测请求与真实链路必须同一口径,否则
+/// kimi-for-coding 等模型的识图探测会 400 误判(2026-08 kimi-for-coding 实测)。
+pub fn moonshot_model_requires_explicit_thinking(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "k3" | "k3-256k"
+            | "kimi-k3"
+            | "kimi-k2.7-code"
+            | "kimi-k2.7-code-highspeed"
+            | "kimi-for-coding"
+            | "kimi-for-coding-highspeed"
+            | "kimi-k2.6"
+    )
+}
+
 /// 内置已验证能力表:模型名小写后按子串匹配,命中即 Supported。
 /// 收录原则:仅明确多模态的模型族,且能从仓内 preset 默认模型或公开事实佐证;
 /// 拿不准的一律不收(走 Unknown + 用户 override)。
@@ -75,11 +92,14 @@ const VERIFIED_IMAGE_CAPABLE_MODELS: &[&str] = &[
     "gpt-4o",
     "gpt-4.1",
     "gpt-5",
-    // Anthropic Claude 3/4 全系视觉输入。
+    // Anthropic Claude 3/4/5 全系视觉输入(默认预设 claude-sonnet-5 命中 claude-5)。
     "claude-3",
     "claude-4",
+    "claude-5",
     // Google Gemini 全系多模态。
     "gemini",
+    // xAI Grok 全系视觉输入(默认预设 grok-4.3 命中)。
+    "grok",
     // 阿里 Qwen VL 系列(qwen-vl / qwen2-vl / qwen2.5-vl / qwen3-vl)。
     // 裸 qwen 名(qwen3.7-plus 等文本模型)不收——见设计 §7.2。
     "qwen-vl",
@@ -106,11 +126,13 @@ fn builtin_verified_supports_image(model: &str) -> bool {
 
 /// 解析一条 SavedModel 的生效图片输入能力(优先级见模块头注释)。
 pub fn effective_image_capability(model: &SavedModel) -> EffectiveImageCapability {
-    // ① 用户显式覆盖优先于一切自动判断。
+    // ① 显式档位优先:Enabled(能)/Disabled(不能)直接钉死。
     match model.image_capability_override {
         ImageCapabilityOverride::Enabled => return EffectiveImageCapability::Supported,
         ImageCapabilityOverride::Disabled => return EffectiveImageCapability::Unsupported,
-        ImageCapabilityOverride::Auto => {}
+        // Auto(自动探测,保存后即被回填,残留值按 pinvou 决策兜底)
+        // 与 Pinvou(pinvou 决策)共用同一条内置表判断链。
+        ImageCapabilityOverride::Auto | ImageCapabilityOverride::Pinvou => {}
     }
     // ②(v0.9.5 起移除)底座 model_catalog 不再公开,目录级 modalities 查询
     // 不可用;模型目录的 image 判定由底座 image_attach::strip_images_when_unsupported
@@ -191,6 +213,7 @@ mod tests {
             preset,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: model.to_string(),
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,
@@ -204,6 +227,34 @@ mod tests {
             credential_state: CredentialState::Missing,
             has_secret: false,
             credential_action: None,
+        }
+    }
+
+    #[test]
+    fn moonshot_always_thinking_list_covers_bridge_canonical_names() {
+        // 名单与 bridge.rs moonshot_model_requires_explicit_thinking 保持一致;
+        // 探测 payload 与真实链路必须同一口径,否则 always-thinking 模型
+        // 识图探测会被网关 400 误判(2026-08 kimi-for-coding 实测)。
+        for name in [
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.6",
+            "K3",
+            "k3-256k",
+        ] {
+            assert!(
+                moonshot_model_requires_explicit_thinking(name),
+                "{name} 应命中 always-thinking 名单"
+            );
+        }
+        for name in ["gpt-4o", "deepseek-v4-pro", "qwen-vl-max", "kimi-k2.5"] {
+            assert!(
+                !moonshot_model_requires_explicit_thinking(name),
+                "{name} 不应误判为 always-thinking"
+            );
         }
     }
 
@@ -249,7 +300,10 @@ mod tests {
             (ModelPreset::OpenaiCompatible, "gpt-5.6-terra"),
             (ModelPreset::OpenaiCompatible, "claude-3-5-sonnet-20241022"),
             (ModelPreset::OpenaiCompatible, "claude-4-opus"),
+            // 默认预设(claude-sonnet-5 / grok-4.3)必须命中,否则官方路由退化成 Unknown。
+            (ModelPreset::OpenaiCompatible, "claude-sonnet-5"),
             (ModelPreset::OpenaiCompatible, "gemini-2.5-pro"),
+            (ModelPreset::OpenaiCompatible, "grok-4.3"),
             (ModelPreset::Qwen, "qwen-vl-max"),
             (ModelPreset::Qwen, "Qwen2.5-VL-72B-Instruct"),
             (ModelPreset::Glm, "glm-4v-plus"),
@@ -267,9 +321,8 @@ mod tests {
 
     #[test]
     fn builtin_table_misses_text_models() {
-        // 各 preset 默认文本模型不得误判 Supported(底座目录也不含 image)。
-        // 注意:mimo-v2.5-pro 已不在此列——底座目录标其 modalities 含 image,
-        // 经第②级判 Supported(见 catalog_positive_hit_upgrades_to_supported)。
+        // 各 preset 默认文本模型不得误判 Supported(目录级判定已移除,
+        // 仅内置已验证表决定;mimo-v2.5-pro 见 catalog_models_not_in_builtin_table_stay_unknown)。
         for (preset, name) in [
             (ModelPreset::Deepseek, "deepseek-v4-pro"),
             (ModelPreset::Kimi, "kimi-k3"),
@@ -288,8 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_positive_hit_upgrades_to_supported() {
-        // 底座目录标 image 但内置表未收录的模型:经第②级判 Supported。
+    fn catalog_models_not_in_builtin_table_stay_unknown() {
+        // v0.9.5 起底座 model_catalog 不再公开,目录级 modalities 判定已移除
+        // (image_capability.rs 第②级为死代码)。mimo-v2.5-pro / muse-spark-1.1
+        // 不在内置已验证表内,能力判定落 Unknown——不再有「目录级升级」路径。
         for (preset, name) in [
             (ModelPreset::Mimo, "mimo-v2.5-pro"),
             (ModelPreset::OpenaiCompatible, "muse-spark-1.1"),
@@ -297,8 +352,8 @@ mod tests {
             let model = saved_model(preset, name);
             assert_eq!(
                 effective_image_capability(&model),
-                EffectiveImageCapability::Supported,
-                "{name} 应经底座模型目录判为支持图片"
+                EffectiveImageCapability::Unknown,
+                "{name} 不在内置已验证表,目录级判定已移除,应判 Unknown"
             );
         }
     }
@@ -347,6 +402,35 @@ mod tests {
         assert_eq!(
             effective_image_capability(&model),
             EffectiveImageCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn pinvou_decision_follows_builtin_table_like_auto() {
+        // Pinvou(pinvou 决策)= 原 Auto 判定链:内置表命中 → Supported,
+        // 未命中 → Unknown;不参与探测回填。
+        let mut hit = saved_model(ModelPreset::OpenaiCompatible, "gpt-4o");
+        hit.image_capability_override = ImageCapabilityOverride::Pinvou;
+        assert_eq!(
+            effective_image_capability(&hit),
+            EffectiveImageCapability::Supported
+        );
+        let mut miss = saved_model(ModelPreset::LocalVllm, "qwen36_35b_256k");
+        miss.image_capability_override = ImageCapabilityOverride::Pinvou;
+        assert_eq!(
+            effective_image_capability(&miss),
+            EffectiveImageCapability::Unknown
+        );
+        // Auto 与 Pinvou 对同一模型判定一致。
+        let auto = saved_model(ModelPreset::OpenaiCompatible, "gpt-4o");
+        let pinvou = {
+            let mut m = saved_model(ModelPreset::OpenaiCompatible, "gpt-4o");
+            m.image_capability_override = ImageCapabilityOverride::Pinvou;
+            m
+        };
+        assert_eq!(
+            effective_image_capability(&auto),
+            effective_image_capability(&pinvou)
         );
     }
 
