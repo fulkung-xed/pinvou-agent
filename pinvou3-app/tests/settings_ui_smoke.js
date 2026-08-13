@@ -1077,6 +1077,15 @@ async function modalWidth(page, headingText) {
   });
   rec('⑦.llama.2 选择「开启 pinvou 时」写入 advanced.llama_engine_auto_start', llamaAutoStartSaved === 'launch', String(llamaAutoStartSaved));
 
+  // ⑦.llama.3 PR3:设备档默认「自动」,显式选 GPU 持久化 llama_engine_default_device。
+  await clickExact(page, 'GPU（Vulkan / Metal）');
+  await sleep(300);
+  const llamaDeviceSaved = await page.evaluate(() => {
+    const call = [...window.__SETTINGS_TEST__.calls].reverse().find(item => item.cmd === 'update_settings');
+    return call && call.args && call.args.patch && call.args.patch.advanced && call.args.patch.advanced.llama_engine_default_device;
+  });
+  rec('⑦.llama.3 选择 GPU 写入 advanced.llama_engine_default_device', llamaDeviceSaved === 'gpu', String(llamaDeviceSaved));
+
   // 回到模型页继续 ⑦.img.6 图片能力测试。
   await clickSettingsSection(page, '模型');
   await sleep(300);

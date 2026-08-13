@@ -2342,9 +2342,11 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const [restartDialog, setRestartDialog] = useState(null);
       // 本地多模态引擎：模型/设备选择 + 诊断日志折叠。模型/设备选择持久化到
       // prefs.advanced（自动启动与发送兜底共用同一套默认，服务端同源解析）。
+      // 新装默认：q4km 档 + 设备自动检测（老用户 prefs 里的 legacy 模型 id
+      // 与显式 cpu/gpu 原样生效，不强制迁移）。
       const llamaAdvanced = (bs && bs.settings && bs.settings.advanced) || {};
-      const [llamaModel, setLlamaModel] = useState(llamaAdvanced.llama_engine_default_model || 'qwen3vl-2b-q3k-s');
-      const [llamaDevice, setLlamaDevice] = useState(llamaAdvanced.llama_engine_default_device || 'gpu');
+      const [llamaModel, setLlamaModel] = useState(llamaAdvanced.llama_engine_default_model || 'qwen3vl-2b-q4km');
+      const [llamaDevice, setLlamaDevice] = useState(llamaAdvanced.llama_engine_default_device || 'auto');
       const [showLlamaLogs, setShowLlamaLogs] = useState(false);
       // 本地引擎视觉兜底开关：默认开（prefs.advanced.llamaEngineVisionFallback !== false）
       const [llamaVisionFallback, setLlamaVisionFallback] = useState(
@@ -3080,6 +3082,9 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                         <RadioDot active={llamaModel === m.id} />
                         <span className="text-[13px] leading-4 text-[#1C1C1E] dark:text-[#F2F2F7]">
                           {m.displayName}
+                          {st.recommendedModel === m.id && (
+                            <span className="ml-1.5 text-[11px] px-1.5 py-0.5 rounded-full bg-[#007AFF]/10 text-[#007AFF]">{settingsCopy.llamaEngine.recommended}</span>
+                          )}
                           {m.installed && <span className="ml-1.5 text-[12px] text-[#34C759]">✓</span>}
                         </span>
                       </button>
@@ -3091,6 +3096,10 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                   </div>
                   <div className="p-4">
                     <div className="text-[13px] font-medium mb-2 text-[#1C1C1E] dark:text-[#F2F2F7]">{settingsCopy.llamaEngine.deviceLabel}</div>
+                    <button onClick={() => applyLlamaDevice('auto')} className="flex items-center gap-2.5 w-full py-1.5 text-left">
+                      <RadioDot active={llamaDevice === 'auto'} />
+                      <span className="text-[13px] text-[#1C1C1E] dark:text-[#F2F2F7]">{settingsCopy.llamaEngine.deviceAuto}</span>
+                    </button>
                     <button onClick={() => applyLlamaDevice('gpu')} className="flex items-center gap-2.5 w-full py-1.5 text-left">
                       <RadioDot active={llamaDevice === 'gpu'} />
                       <span className="text-[13px] text-[#1C1C1E] dark:text-[#F2F2F7]">{settingsCopy.llamaEngine.gpu}</span>
@@ -3099,6 +3108,11 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                       <RadioDot active={llamaDevice === 'cpu'} />
                       <span className="text-[13px] text-[#1C1C1E] dark:text-[#F2F2F7]">{settingsCopy.llamaEngine.cpu}</span>
                     </button>
+                    {llamaDevice === 'auto' && (
+                      <div className="mt-1 text-[12px] leading-4 text-[#9AA0A6] dark:text-[#636366]">
+                        {st.detectedDevice === 'gpu' ? settingsCopy.llamaEngine.deviceAutoGpu : settingsCopy.llamaEngine.deviceAutoCpu}
+                      </div>
+                    )}
                   </div>
                   <div className="p-4">
                     <div className="text-[13px] font-medium mb-2 text-[#1C1C1E] dark:text-[#F2F2F7]">{settingsCopy.llamaEngine.serviceLabel}</div>
@@ -3107,7 +3121,8 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                         onClick={() => {
                           if (!bridge.available || !bridge.llamaEngine) return;
                           if (running || starting) bridge.llamaEngine.stopEngine().catch(() => {});
-                          else bridge.llamaEngine.startEngine(llamaModel, llamaDevice).catch(() => {});
+                          // auto 档传给后端已解析的检测值（llama_engine_start 只认 cpu/gpu）
+                          else bridge.llamaEngine.startEngine(llamaModel, llamaDevice === 'auto' ? (st.detectedDevice || 'cpu') : llamaDevice).catch(() => {});
                         }}
                         disabled={starting}
                         className={`h-9 px-4 rounded-full text-[14px] font-semibold ${starting ? 'opacity-50' : ''} ${running ? 'bg-[#FF3B30] text-white' : 'bg-[#007AFF] text-white'}`}>

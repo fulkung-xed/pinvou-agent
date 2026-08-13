@@ -518,7 +518,8 @@ pub struct AdvancedPrefs {
     /// None → 读取侧回落 `download::default_model()`。
     #[serde(default)]
     pub llama_engine_default_model: Option<String>,
-    /// 本地多模态引擎默认设备("gpu"/"cpu")。None → 读取侧回落 "gpu"。
+    /// 本地多模态引擎默认设备("auto"/"gpu"/"cpu")。None/"auto" → 读取侧平台
+    /// 自动检测（独显/强核显白名单 → gpu，其余 → cpu），显式 cpu/gpu 优先。
     #[serde(default)]
     pub llama_engine_default_device: Option<String>,
 }

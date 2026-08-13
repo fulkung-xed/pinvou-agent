@@ -46,6 +46,7 @@ Object.assign(dict.zh.uiAttachments, {
   localEngineInstallError:'本地识图引擎安装失败',
   localEngineDownloading:'正在下载引擎组件，请稍候…',
   localEngineClose:'关闭',
+  imageCompressed:'图片较大已压缩，识别可能较慢',
 });
 Object.assign(dict.en.uiSettingsDetail, {
   reasoningEffort:'Thinking depth', reasoningEffortTiers:{ off:'Off', low:'Low', medium:'Medium', high:'High', max:'Max' },
@@ -115,6 +116,7 @@ Object.assign(dict.en.uiAttachments, {
   localEngineInstallError:'Failed to install the local image engine',
   localEngineDownloading:'Downloading engine components…',
   localEngineClose:'Close',
+  imageCompressed:'Large image compressed before sending; recognition may be slower',
 });
 Object.assign(dict.ja.uiSettingsDetail, {
   reasoningEffort:'思考の深さ', reasoningEffortTiers:{ off:'オフ', low:'低', medium:'中', high:'高', max:'最大' },
@@ -184,6 +186,7 @@ Object.assign(dict.ja.uiAttachments, {
   localEngineInstallError:'ローカル画像認識エンジンのインストールに失敗しました',
   localEngineDownloading:'エンジンコンポーネントをダウンロード中…',
   localEngineClose:'閉じる',
+  imageCompressed:'大きな画像を圧縮しました。認識が遅くなる場合があります',
 });
 Object.assign(dict.en.uiSettingsDetail.modelDescriptions, {
   '本地服务默认模型':'Default model for the local service',
@@ -263,6 +266,10 @@ dict.zh.uiSettingsDetail.llamaEngine = {
   engineLabel: '引擎', modelLabel: '视觉模型', deviceLabel: '设备', serviceLabel: '服务',
   installEngine: '下载引擎（约 40MB）', installModel: '下载模型',
   gpu: 'GPU（Vulkan / Metal）', cpu: 'CPU',
+  deviceAuto: '自动',
+  deviceAutoGpu: '已检测到可用 GPU',
+  deviceAutoCpu: '未检测到可用 GPU，将使用 CPU',
+  recommended: '推荐',
   start: '启动引擎', stop: '停止引擎',
   viewLogs: '查看日志',
   privacyNote: '仅监听本机 127.0.0.1，模型与图片数据不离开电脑。',
@@ -288,6 +295,10 @@ dict.en.uiSettingsDetail.llamaEngine = {
   engineLabel: 'Engine', modelLabel: 'Vision model', deviceLabel: 'Device', serviceLabel: 'Service',
   installEngine: 'Download engine (~40MB)', installModel: 'Download model',
   gpu: 'GPU (Vulkan / Metal)', cpu: 'CPU',
+  deviceAuto: 'Auto',
+  deviceAutoGpu: 'Usable GPU detected',
+  deviceAutoCpu: 'No usable GPU detected; CPU will be used',
+  recommended: 'Recommended',
   start: 'Start engine', stop: 'Stop engine',
   viewLogs: 'View logs',
   privacyNote: 'Listens on 127.0.0.1 only. Models and images never leave your computer.',
@@ -313,6 +324,10 @@ dict.ja.uiSettingsDetail.llamaEngine = {
   engineLabel: 'エンジン', modelLabel: 'ビジョンモデル', deviceLabel: 'デバイス', serviceLabel: 'サービス',
   installEngine: 'エンジンをダウンロード（約 40MB）', installModel: 'モデルをダウンロード',
   gpu: 'GPU（Vulkan / Metal）', cpu: 'CPU',
+  deviceAuto: '自動',
+  deviceAutoGpu: '利用可能な GPU を検出しました',
+  deviceAutoCpu: '利用可能な GPU が見つかりません。CPU を使用します',
+  recommended: 'おすすめ',
   start: 'エンジンを起動', stop: 'エンジンを停止',
   viewLogs: 'ログを表示',
   privacyNote: '127.0.0.1 のみで待ち受け。モデルと画像は端末から離れません。',
