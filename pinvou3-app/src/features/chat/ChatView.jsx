@@ -1282,6 +1282,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       // install | notRunning | starting | downloading | timeout | installError。
       const [localEnginePrompt, setLocalEnginePrompt] = useState(null);
       const pendingLocalEngineSendRef = useRef(null); // { resolve(boolean), info } 挂起中的发送
+      // 发送前预缩放命中时的轻提示（超大图已压缩），数秒后自动消失。
+      const [imageCompressedNotice, setImageCompressedNotice] = useState(false);
+      const imageCompressedTimerRef = useRef(null);
+      function showImageCompressedNotice() {
+        setImageCompressedNotice(true);
+        if (imageCompressedTimerRef.current) clearTimeout(imageCompressedTimerRef.current);
+        imageCompressedTimerRef.current = setTimeout(() => setImageCompressedNotice(false), 6000);
+      }
       useEffect(() => {
         if (!hasImageAttachment || isScheduledSession || !bridge.available
           || !bridge.models || typeof bridge.models.getImageInputCapability !== 'function') {
@@ -1572,13 +1580,26 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             const file = it.getAsFile();
             if (!file) continue;
             e.preventDefault();
-            const reader = new FileReader();
-            reader.onload = () => {
-              const bytes = Array.from(new Uint8Array(reader.result));
-              const ext = (file.type.split('/')[1] || 'png');
-              if (bridge.available) bridge.attachments.addPasteImage(`paste-${Date.now()}.${ext}`, bytes);
+            const addImage = (blob, ext, compressed) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const bytes = Array.from(new Uint8Array(reader.result));
+                if (bridge.available) bridge.attachments.addPasteImage(`paste-${Date.now()}.${ext}`, bytes);
+                if (compressed) showImageCompressedNotice();
+              };
+              reader.readAsArrayBuffer(blob);
             };
-            reader.readAsArrayBuffer(file);
+            // 发送前预缩放:超长边图片先压到 ~1500px JPEG 再入附件(本地引擎
+            // 视觉编码耗时随 token 线性增长);canvas 不可用(如 web 宿主)时
+            // prescale 内部原样回落,链路行为不变。
+            const prescale = window.PinvouImagePrescale;
+            if (prescale && typeof prescale.prescaleImageFile === 'function') {
+              prescale.prescaleImageFile(file).then(({ file: scaled, compressed }) => {
+                addImage(scaled, compressed ? 'jpg' : (file.type.split('/')[1] || 'png'), compressed);
+              });
+            } else {
+              addImage(file, file.type.split('/')[1] || 'png', false);
+            }
           }
         }
       }
@@ -1885,6 +1906,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 className="flex items-center gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] leading-5 bg-amber-500/10 text-amber-700 dark:text-amber-300">
                 <AlertTriangle size={14} className="shrink-0 text-amber-500" />
                 <span className="min-w-0">{imageInputWarning}</span>
+              </div>
+            )}
+            {imageCompressedNotice && (
+              <div data-testid="image-compressed-notice"
+                className="mb-2 px-3 text-[11px] leading-4 text-black/45 dark:text-white/45">
+                {t.uiAttachments.imageCompressed}
               </div>
             )}
             {imagePrivacyHint && (
