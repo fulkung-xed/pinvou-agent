@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.6 clean re-fork guard: ten published commits across five themes.
+# CodeWhale v0.9.5 clean re-fork guard: nine published commits across five themes.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TUI="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
-EXPECTED_UPSTREAM="9237a5778facc391a5bcffc91e89d8350ba95761"
-EXPECTED_HEAD="944a844a26334bb88d44ecda07006994df3f7971"
-EXPECTED_COMMITS=11
+EXPECTED_UPSTREAM="853cb707bbcf4f7dc4268fba6d811e0d04083f9c"
+EXPECTED_HEAD="b273718a10ebea06c4727a4e15b3e601fd80a5fb"
+EXPECTED_COMMITS=9
 FAST_ONLY=0
 [[ "${1:-}" == "--fast" ]] && FAST_ONLY=1
 
@@ -17,7 +17,7 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 fail=0
 
-bold "── 第 0 层：v0.9.6 基线与五主题公开拓扑 ──"
+bold "── 第 0 层：v0.9.5 基线与五主题公开拓扑 ──"
 actual_head="$(git -C "$TUI" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
   green "  ✓ CodeWhale gitlink 指向公开基线 $EXPECTED_HEAD"
@@ -27,24 +27,24 @@ else
 fi
 
 if git -C "$TUI" merge-base --is-ancestor "$EXPECTED_UPSTREAM" HEAD 2>/dev/null; then
-  green "  ✓ 维护基线继承官方 v0.9.6"
+  green "  ✓ 维护基线继承官方 v0.9.5"
 else
-  red "  ✗ 维护基线不继承官方 v0.9.6 commit $EXPECTED_UPSTREAM"
+  red "  ✗ 维护基线不继承官方 v0.9.5 commit $EXPECTED_UPSTREAM"
   fail=1
 fi
 
 commit_count="$(git -C "$TUI" rev-list --count "$EXPECTED_UPSTREAM..HEAD" 2>/dev/null || true)"
 if [[ "$commit_count" == "$EXPECTED_COMMITS" ]]; then
-  green "  ✓ v0.9.6 之上 11 个公开提交"
+  green "  ✓ v0.9.5 之上 9 个公开提交"
 else
-  red "  ✗ v0.9.6 之上有 ${commit_count:-<unreadable>} 个 commit，公开登记为 $EXPECTED_COMMITS"
+  red "  ✗ v0.9.5 之上有 ${commit_count:-<unreadable>} 个 commit，公开登记为 $EXPECTED_COMMITS"
   fail=1
 fi
 
 bold "── 第 1 层：五主题与父仓指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
-  "T1|v0.9.6 library 只公开宿主入口       |CodeWhale/crates/tui/src/lib.rs|pub mod automation_manager;"
+  "T1|v0.9.5 library 只公开宿主入口       |CodeWhale/crates/tui/src/lib.rs|pub mod automation_manager;"
   "T1|宿主可重载 Fleet roster             |CodeWhale/crates/tui/src/lib.rs|pub use fleet::roster::FleetRoster;"
   "T1|Fleet roster 宿主入口回归           |CodeWhale/crates/tui/src/lib.rs|fn forkguard_host_can_load_workspace_fleet_roster"
   "T1|宿主只读 live worker 投影          |CodeWhale/crates/tui/src/tools/subagent/mod.rs|pub fn read_persisted_agent_worker_records("
@@ -84,7 +84,7 @@ fingerprints=(
 
   "APP|产品白名单复用原生 allowed_tools   |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|allowed_tools: Some(crate::features::assistant::tool_policy::allowed_tool_names())"
   "APP|会话工具开关走动态禁用整形          |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn shape_disallowed_tools("
-  "APP|v0.9.6 subagent state root 透传     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|subagent_state_root,"
+  "APP|v0.9.5 subagent state root 透传     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|subagent_state_root,"
   "APP|三省六部动态产物最小写入声明        |pinvou3-app/src-tauri/src/features/assistant/harness.rs|fn forkguard_dynamic_workflow_role_claims_only_its_declared_output"
   "APP|resolved route 由宿主统一解析        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn resolve_runtime_route_for_model("
   "APP|128K/256K compaction 合约            |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn forkguard_compaction_128k_scenarios"
@@ -122,7 +122,7 @@ bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
 
 echo
 if [[ $fail -eq 0 ]]; then
-  green "✅ fork-guard 全过：5 个 v0.9.6 fork 主题完好。"
+  green "✅ fork-guard 全过：5 个 v0.9.5 fork 主题完好。"
 else
   red "❌ fork-guard 失败：请对照 docs/fork-modifications.md 排查。"
 fi

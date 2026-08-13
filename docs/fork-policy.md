@@ -1,14 +1,14 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-08-12（公开维护基线：上游 `v0.9.6` + 5 个 Pinvou 主题）
+> 最后更新：2026-08-13（本分支基线：上游 `v0.9.5` + 5 个 Pinvou 主题 + 2 个 vision 提交；v0.9.6 升级在 `feat/llama-engine-image-input` 分支进行）
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 > English: [`docs/fork-policy.en.md`](fork-policy.en.md)
 
 ## 0. 当前基线
 
-- 上游：`Hmbown/CodeWhale` tag `v0.9.6`，commit `9237a5778facc391a5bcffc91e89d8350ba95761`。
-- 升级分支：`pinvou3-clean-v0.9.6`，head `fadcfe57ebe4490556e031fc0a31479298d30db2`（验收完成，待发布为 `Pinvou/CodeWhale:pinvou3-clean` 新 head 并打 `pinvou-v0.9.6-r1` 标签）。
-- 升级前基线 `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` 保留在不可变标签 `pinvou-v0.9.5-r5`；更早基线保留在 tag `pinvou-v0.9.0-r4` 和 branch `backup/pinvou3-clean-v0.9.0-r4`。
+- 上游：`Hmbown/CodeWhale` tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c`。
+- 维护分支：`pinvou3-clean-v0.9.5-vision`，head `b273718a10ebea06c4727a4e15b3e601fd80a5fb`（团队现行底座 `pinvou-v0.9.5-r5` / `2eceab4e1` 之上叠加 vision 慢设备适配与 image_analyze 可配置化两个提交）。
+- 升级前基线 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` 保留在 tag `pinvou-v0.9.0-r4` 和 branch `backup/pinvou3-clean-v0.9.0-r4`。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
 - 当前只维护 5 个长期主题：
 

@@ -4,19 +4,21 @@
 > 基线、主题边界、守护指纹和同步结论以本文与 `docs/fork-policy.md` 为准。
 > English: [`docs/fork-modifications.en.md`](fork-modifications.en.md)
 
-## 0. 当前状态（2026-08-12 · v0.9.6 公开基线）
+## 0. 当前状态（2026-08-13 · v0.9.5 r5 + vision 对齐基线）
+
+> 本分支（`feat/llama-engine-image-input-v095`）对齐团队现行 v0.9.5 底座；v0.9.6 升级在 `feat/llama-engine-image-input` 分支进行，其基线口径见该分支本文。
 
 | 项 | 当前值 |
 |---|---|
-| 上游基线 | tag `v0.9.6`，commit `9237a5778facc391a5bcffc91e89d8350ba95761` |
-| 公开维护分支 | `pinvou3-clean-v0.9.6`，head `944a844a26334bb88d44ecda07006994df3f7971`（待发布到 `Pinvou/CodeWhale:pinvou3-clean`） |
-| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11` 已合并，其内容随主题移植包含在新分支 |
-| 公开状态 | 升级分支验收完成待发布；上一公开基线 `pinvou-v0.9.5-r5`（`2eceab4e1`）保留为不可变历史标签 |
-| 旧基线备份 | tag `pinvou-v0.9.0-r4` + branch `backup/pinvou3-clean-v0.9.0-r4`，均指向 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624`；v0.9.5 基线由 `pinvou-v0.9.5-r5` 保留 |
-| 组织方式 | 从 `v0.9.6` clean re-fork 的 5 个长期主题、11 个线性提交（6 主题 + session 修复 + append_file + vision 慢设备适配 + 移植编译 fixup + PR2 vision 链路增强） |
-| drift | `50 files changed, +2767/-336`（相对 v0.9.6）；净增约 2431 行 |
+| 上游基线 | tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
+| 公开维护分支 | `pinvou3-clean-v0.9.5-vision`，head `b273718a10ebea06c4727a4e15b3e601fd80a5fb`（`pinvou-v0.9.5-r5` 之上叠加 2 个 vision 提交，待发布） |
+| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11` 已合并；团队现行底座 head 为 `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
+| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 均指向 `2eceab4e1`；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签 |
+| 旧基线备份 | tag `pinvou-v0.9.0-r4` + branch `backup/pinvou3-clean-v0.9.0-r4`，均指向 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
+| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题、9 个线性提交（7 个基线提交 + vision 慢设备适配 + image_analyze 可配置化与流式健壮性） |
+| drift | `50 files changed, +2881/-344`；净增约 2537 行 |
 | 守护 | 23 条 CodeWhale `forkguard_*` 行为测试 + 父仓指纹/行为测试 |
-| 父仓适配 | gitlink、`Cargo.lock`、dump bin 修复、`boot_for_process_startup` 回退修复 |
+| 父仓适配 | gitlink、`Cargo.lock`、`EngineConfig` v0.9.5 字段适配 |
 
 ### 本次会话修复（已验证并发布）
 
@@ -29,9 +31,11 @@
 
 ### 待验证改动（2026-08-12 · 慢设备 vision 超时适配）
 
-> 状态更新（2026-08-12）：本改动已随 v0.9.6 升级移植进 `pinvou3-clean-v0.9.6`（`e7bda367b`），验收结果见本文 §6。
+> 状态更新（2026-08-13 · 本分支口径）：慢设备 vision 适配（`669d87090`）与 PR2 vision 链路增强
+> （`b273718a1`）已直接落在 v0.9.5 基线 `2eceab4e1` 之上，计入 §0 公开维护分支 head。
+> v0.9.6 侧的对应移植（`e7bda367b`、`944a844a2`）在 `feat/llama-engine-image-input` 分支进行。
 >
-> 状态更新（2026-08-13 · PR2 vision 链路增强，`944a844a2`）：提示词与 temperature 已移出底座——
+> PR2 增强内容：提示词与 temperature 已移出底座——
 > `VisionModelConfig` 新增 `system_prompt` / `default_prompt` / `max_output_tokens` / `temperature` /
 > `request_timeout_secs` / `stream` 六个 Option 字段（全 `None` 回落原有内置行为），提示词常量
 > （三要素 + 长文本软约束）与 `temperature: 0.2` 由应用层（`bridge.rs::vision_model_config`）注入。
@@ -39,8 +43,8 @@
 > 有限重试（仅 429/499/500/502/503/504，最多 2 次，退避 1s→2s，尊重 Retry-After 封顶 10s）、
 > SSE 字节行缓冲（修复跨 chunk 多字节 UTF-8 损坏/丢 delta）、流中读取错误返回部分内容 +
 > `truncated`、非流式兜底（无端点 SSE data 且内容为空时报错）与 `stream = false` 普通 JSON 解析。
-> `cargo check --lib --tests` 通过；`cargo test --lib vision` 因本机 rustc 1.97.1 随机 ICE
-> （基线 HEAD 同样失败，预存环境问题）未能执行，待健康环境补跑。
+> 本分支验收：`cargo check -p codewhale-tui --lib --tests` 0 error；
+> `cargo test -p codewhale-tui --lib vision` 全过。
 
 - 现象：Intel 核显（UHD 750，Vulkan 驱动 30.0.100.9805）上 `image_analyze` 冷启动请求
   超过 `120s` 客户端超时，4 次重试全部排队失败 → `Retry exhausted` → 主模型自动重试
@@ -213,6 +217,8 @@ cargo build --locked --no-default-features --features local-embed --bin pinvou3-
 - 发布后把本节状态更新为远端维护分支、不可变标签和实际 commit，并验证父仓 gitlink 一致。
 
 ## 6. v0.9.6 升级记录（2026-08-12）
+
+> 本节记录保留作历史参考；v0.9.6 升级分支 `pinvou3-clean-v0.9.6` 与父仓 `feat/llama-engine-image-input` 配套，本分支基线仍为 v0.9.5（见 §0）。
 
 上游 v0.9.5 → v0.9.6（391 commits / 156 files，subtractive release：统一 base prompt、7 名小工具箱 + `tool_search`、compaction 重写、小写 `bash` + Scout/Reviewer、遥测默认开启、guard 移除）。
 
