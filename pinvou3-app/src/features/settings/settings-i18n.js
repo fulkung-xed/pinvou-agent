@@ -4,6 +4,7 @@
 import { dict } from '../../shared/i18n.js';
 
 Object.assign(dict.zh.uiSettingsDetail, {
+  reasoningEffort:'思考深度', reasoningEffortTiers:{ off:'关闭', low:'低', medium:'中', high:'高', max:'最深' },
   addProvider:provider=>`添加 ${provider}`, editProvider:provider=>`编辑 ${provider}`,
   autoDetectLocalModel:'自动检测本地模型',
   codingPlanTestUnavailable:'当前厂商接口暂时无法完成测试，但不影响保存配置',
@@ -34,6 +35,7 @@ Object.assign(dict.zh.uiAttachments, {
   imageCloudUploadVision:'图片将发送给你配置的视觉模型服务商进行分析',
 });
 Object.assign(dict.en.uiSettingsDetail, {
+  reasoningEffort:'Thinking depth', reasoningEffortTiers:{ off:'Off', low:'Low', medium:'Medium', high:'High', max:'Max' },
   saving:'Saving', localDetectionTargets:'Detect vLLM, Ollama, and LM Studio',
   redetect:'Detect again', detect:'Detect', noRunningLocalModel:'No running local model detected', modelNotLoadedTag:'Not loaded', modelNotLoadedHint:'Not in memory yet; it will load automatically on first use',
   add:'Add', manualLocalModel:'Add a local model manually',
@@ -89,6 +91,7 @@ Object.assign(dict.en.uiAttachments, {
   imageCloudUploadVision:'Images will be sent to the vision model provider you configured for analysis.',
 });
 Object.assign(dict.ja.uiSettingsDetail, {
+  reasoningEffort:'思考の深さ', reasoningEffortTiers:{ off:'オフ', low:'低', medium:'中', high:'高', max:'最大' },
   saving:'保存中', localDetectionTargets:'vLLM、Ollama、LM Studio を検出',
   redetect:'再検出', detect:'検出', noRunningLocalModel:'実行中のローカルモデルが見つかりません', modelNotLoadedTag:'未読み込み', modelNotLoadedHint:'メモリ未読み込み。初回使用時に自動でロードされます',
   add:'追加', manualLocalModel:'ローカルモデルを手動追加',
