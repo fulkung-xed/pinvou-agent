@@ -107,7 +107,7 @@
     "test:markdown-artifact-ui": "node tests/markdown_artifact_edit_smoke.js",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
-    "test:markdown": "node tests/render_markdown.test.js && node tests/markdown_syntax_highlight.test.mjs",
+    "test:markdown": "node tests/render_markdown.test.js && node tests/markdown_syntax_highlight.test.mjs && node tests/markdown_bridge_fallback_safety.test.mjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",
     "sync:version": "node ../scripts/sync-version.mjs"
   },
