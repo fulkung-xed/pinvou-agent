@@ -46,6 +46,40 @@ use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
 const LOCAL_VLLM_API_KEY: &str = "local-no-auth";
 const SEPARATE_REASONING_FIELD: &str = "separate_field";
 
+// 视觉工具（image_analyze）提示词与采样参数：底座 PR2 起提示词/temperature
+// 移出底座，由应用层注入；system prompt 在三要素转写纪律上追加长文本软约束，
+// 避免小模型面对密集文字图时逐字硬转写撑爆输出。
+const VISION_SYSTEM_PROMPT: &str = "You are an image content analyst. Describe the image accurately: \
+     1) the image type (screenshot / photo / document / chart); \
+     2) all visible text, transcribed verbatim in its original language; \
+     3) key visual elements and layout. Never fabricate details you cannot see. \
+     If the visible text is very long, transcribe the most important parts and \
+     explicitly note that the rest is omitted.";
+const VISION_DEFAULT_PROMPT: &str = "Describe this image accurately: the image type \
+     (screenshot / photo / document / chart), all visible text transcribed verbatim, \
+     and the key visual elements and layout.";
+const VISION_TEMPERATURE: f32 = 0.2;
+
+/// 构造视觉工具配置（设计 §9.3）：统一注入应用层提示词与 temperature;
+/// max_output_tokens / request_timeout_secs / stream 传 None 回落底座默认。
+fn vision_model_config(
+    model: String,
+    api_key: String,
+    base_url: String,
+) -> deepseek_tui::config::VisionModelConfig {
+    deepseek_tui::config::VisionModelConfig {
+        model,
+        api_key: Some(api_key),
+        base_url: Some(base_url),
+        system_prompt: Some(VISION_SYSTEM_PROMPT.to_string()),
+        default_prompt: Some(VISION_DEFAULT_PROMPT.to_string()),
+        max_output_tokens: None,
+        temperature: Some(VISION_TEMPERATURE),
+        request_timeout_secs: None,
+        stream: None,
+    }
+}
+
 // 多智能体是“主会话总协调、复杂任务最多再拆一层”的 agent 集群，不是
 // 无界递归树。普通对话继续沿用 CodeWhale 原始上限；仅开启多智能体的
 // 会话收紧资源预算。
@@ -887,11 +921,7 @@ impl Pinvou3Bridge {
     fn resolve_vision_model_config(&self) -> Option<deepseek_tui::config::VisionModelConfig> {
         if vision_local_gate(&self.prefs.advanced, self.effective_model()) {
             if let Some(endpoint) = crate::features::llama_engine::vision_endpoint() {
-                return Some(deepseek_tui::config::VisionModelConfig {
-                    model: self.model(),
-                    api_key: Some(self.api_key()),
-                    base_url: Some(endpoint),
-                });
+                return Some(vision_model_config(self.model(), self.api_key(), endpoint));
             }
         }
         let effective = self.effective_model();
@@ -912,18 +942,18 @@ impl Pinvou3Bridge {
                 );
                 return None;
             }
-            return Some(deepseek_tui::config::VisionModelConfig {
-                model: vision.model.clone(),
-                api_key: Some(api_key),
-                base_url: Some(vision.base_url.clone()),
-            });
+            return Some(vision_model_config(
+                vision.model.clone(),
+                api_key,
+                vision.base_url.clone(),
+            ));
         }
         if effective.map(effective_image_capability) == Some(EffectiveImageCapability::Supported) {
-            return Some(deepseek_tui::config::VisionModelConfig {
-                model: self.model(),
-                api_key: Some(self.api_key()),
-                base_url: Some(self.base_url()),
-            });
+            return Some(vision_model_config(
+                self.model(),
+                self.api_key(),
+                self.base_url(),
+            ));
         }
         None
     }
@@ -1088,10 +1118,17 @@ impl Pinvou3Bridge {
     ///   E = W − O − 1024           (底座 emergency 线,conservative 全量尺)
     ///   O 来自同一 route profile；未声明 route 时才由底座 provider/model fallback 推导
     ///
-    /// ÷1.5 把 conservative 全量尺换算回 `should_compact` 的 raw 子集尺(k=1.5 实测精确,
+    /// ÷1.5 把 conservative 全量尺换算回触发判断用的 raw 尺(k=1.5 实测精确,
     /// pinvou 关 thinking 无偏移)。S=4000(system 保守估算,dump 实测 ~1.4K + 余量);
     /// FIXED=22000(framing ~2.5K + pinned/recent R ~4.5K + safety margin ~15K)。
     /// 写死单值对任一窗口非倒置即过保守,故按窗口推导(实证:262K→~133K / 131K→~46K)。
+    ///
+    /// 注(v0.9.6 复核):底座触发判断已从「待摘要子集 raw 估算 > T − pinned」改为
+    /// `compaction_pressure_reached_with_billed`——「全量 raw 估算(含 system+framing)
+    /// 与 provider billed 取 max ≥ T」(compaction.rs)。比较尺变大 → 触发更早,方向
+    /// 保守安全,本推导的 T 值仍成立(forkguard 45648/133029 实测复核通过);另注意
+    /// v0.9.6 新增 reclaimability guard:retained floor ≥ T 时 auto-compact 静默不触发,
+    /// 128K 窗口 T=45648 下最坏 floor ~33K,余量 ~12K。
     fn derive_compaction_threshold(&self, model: &str) -> usize {
         let window = self.effective_context_window(model) as usize;
         // [pinvou3-fork 根治 2026-07-03] 直接问底座要 emergency input budget E,**不再镜像**
@@ -1374,8 +1411,9 @@ impl Pinvou3Bridge {
             workshop,
             snapshots_max_workspace_bytes,
             // pinvou3 search 后端: prefs 翻译。
-            // Bing 是默认 (fork patch #42 在底座 SearchProvider::default());Metaso/Bocha/Baidu
-            // 是 GUI 切换项。底座 web_search 对 Metaso 留空 key 用内置共享 key
+            // 默认来自 prefs（Bing，platform/prefs/mod.rs），这里显式填充，不依赖底座
+            // SearchProvider::default()（上游 v0.9.6 起默认已改 Firecrawl，与本注释无关）。
+            // 底座 web_search 对 Metaso 留空 key 用内置共享 key
             // (~100 次/天),对 Bocha/Baidu 留空 key 直接报 ToolError "requires API key"。
             search_provider: match self.prefs.search.provider {
                 prefs::SearchProvider::Bing => deepseek_tui::config::SearchProvider::Bing,
@@ -1642,8 +1680,9 @@ impl Pinvou3Bridge {
     }
 
     /// 注入硬拦截 hook：ToolCallBefore 时 spawn 一个 shell 脚本检查 tool args
-    /// 是否触碰敏感目录（~/.ssh / ~/.gnupg / ~/.aws / 等），命中 exit 1
-    /// 让上游拒绝该 tool 调用。脚本本体在 bundle 中,首次启动解包到
+    /// 是否触碰敏感目录（~/.ssh / ~/.gnupg / ~/.aws / 等），命中 exit 2 +
+    /// stdout JSON {"decision":"deny","reason":...} 让上游拒绝该 tool 调用并把
+    /// reason 喂回模型。脚本本体在 bundle 中,首次启动解包到
     /// `~/.pinvou3/bundle/deny_sensitive_paths.sh`。
     fn build_hooks_config(&self) -> HooksConfig {
         #[cfg(windows)]

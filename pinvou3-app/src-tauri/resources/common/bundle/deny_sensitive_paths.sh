@@ -9,6 +9,11 @@
 #    JSON {"decision":"deny"}）。旧底座任意非零即拒，本脚本曾用 exit 1；v0.8.60
 #    起 exit 1 被当作 passthrough(ALLOW)，敏感目录硬墙会静默失效——务必保持 exit 2。
 #
+# ⚠️ deny 文案契约：fold 只从 stdout 的 JSON {"decision":"deny","reason":"..."}
+#    里取 reason 喂回模型；纯文本 stdout 一律 passthrough，模型只会收到默认的
+#    "ToolCallBefore hook denied tool execution"。所以所有 deny 路径必须经 deny()
+#    输出 JSON，具体引导文案（如 sudo 开关、load_skill 纠正）才能送达模型。
+#
 # 软引导（bundle/instructions.md）已经在 system prompt 里告诉 AI 不要碰这些
 # 目录，但 prompt 不是 100% 可靠（Qwen3.6 偶尔会忽略）。这里是兜底硬墙。
 #
@@ -16,6 +21,14 @@
 # 通常会改用别的路径或告诉用户。
 
 set -uo pipefail
+
+# JSON 转义 reason 并输出 deny 裁决（fold 只认这个格式），同时 stderr 留人类可读日志。
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+deny() {
+    echo "pinvou3-deny: $1" >&2
+    printf '{"decision":"deny","reason":"%s"}\n' "$(json_escape "$1")"
+    exit 2
+}
 
 ARGS="${DEEPSEEK_TOOL_ARGS:-}"
 TOOL="${DEEPSEEK_TOOL_NAME:-unknown}"
@@ -36,8 +49,7 @@ SENSITIVE_DIRS=(
 
 for pat in "${SENSITIVE_DIRS[@]}"; do
     if [[ "$ARGS" == *"$pat"* ]]; then
-        echo "pinvou3-deny: tool '$TOOL' attempted to touch sensitive directory ($pat) — blocked" >&2
-        exit 2
+        deny "tool '$TOOL' attempted to touch sensitive directory ($pat) — blocked"
     fi
 done
 
@@ -58,8 +70,7 @@ SENSITIVE_NAMES=(
 
 for kw in "${SENSITIVE_NAMES[@]}"; do
     if [[ "$ARGS" == *"$kw"* ]]; then
-        echo "pinvou3-deny: tool '$TOOL' attempted to touch sensitive file ($kw) — blocked" >&2
-        exit 2
+        deny "tool '$TOOL' attempted to touch sensitive file ($kw) — blocked"
     fi
 done
 
@@ -75,8 +86,7 @@ if [[ "$TOOL" == "exec_shell"* || "$TOOL" == "code_execution" ]]; then
     )
     for dc in "${DANGEROUS_CMDS[@]}"; do
         if [[ "$ARGS" == *"$dc"* ]]; then
-            echo "pinvou3-deny: '$TOOL' contains dangerous command pattern ($dc) — blocked" >&2
-            exit 2
+            deny "'$TOOL' contains dangerous command pattern ($dc) — blocked"
         fi
     done
 fi
@@ -89,8 +99,7 @@ fi
 if [[ "$TOOL" == "exec_shell"* ]]; then
     if [[ "$ARGS" =~ (^|[^[:alnum:]_])sudo([^[:alnum:]_]|$) ]]; then
         if [[ ! -e /etc/sudoers.d/pinvou3 ]]; then
-            echo "pinvou3-deny: 超级权限未开启，sudo 会阻塞到超时（不是真在执行）。已拦截。请去【设置 → 系统权限】打开开关后重试，或把命令贴出来自己跑。" >&2
-            exit 2
+            deny "超级权限未开启，sudo 会阻塞到超时（不是真在执行）。已拦截。请去【设置 → 系统权限】打开开关后重试，或把命令贴出来自己跑。"
         fi
     fi
 fi
@@ -99,16 +108,15 @@ fi
 #    （wecomcli-* / lark-* / dws / tmeet-skill，
 #    无 MCP schema），模型却可能对它们调 list_mcp_resources / list_mcp_resource_templates
 #    去自省能力 → 必然失败 → 误判「没连上」，甚至谎称缺技能。这里拦掉并把纠正回传：
-#    deny 文案走 **stdout 首行**（fold_tool_call_before_results 在 exit 2 时取 stdout 首行
-#    作 deny_reason，喂回模型当 tool 失败原因），引导模型改用 load_skill。
+#    deny 文案经 deny() 输出 stdout JSON（fold 只从 JSON 取 reason 喂回模型），
+#    引导模型改用 load_skill。
 #    取代原 bundle/instructions.md 常驻那条软纪律：零常驻 prompt + 现场硬反馈对小模型更准。
 if [[ "$TOOL" == "list_mcp_resources" || "$TOOL" == "list_mcp_resource_templates" ]]; then
     # 关键词覆盖模型可能传的各种写法:英文 wecom/weixin/wework、中文全称「企业微信」
     # (注意「企微」子串不含在「企业微信」里,必须显式列全称)、feishu/lark/飞书、
     # 以及 dingtalk/dingding/dws/钉钉、tmeet/tencent meeting/腾讯会议。
     if [[ "$ARGS" =~ (wecom|weixin|wework|feishu|lark|dingtalk|dingding|dws|tmeet|tencent[[:space:]_-]?meeting|企微|企业微信|微信|飞书|钉钉|腾讯会议) ]]; then
-        echo "企微/飞书/钉钉/腾讯会议不是 MCP server（无 schema），是技能型连接器：请改用 load_skill 加载 wecomcli-* / lark-* / dws / tmeet-skill 技能，再按技能说明跑 wecom-cli / lark-cli / dws / tmeet。连接状态以工具面板为准，自省失败不代表未连接。"
-        exit 2
+        deny "企微/飞书/钉钉/腾讯会议不是 MCP server（无 schema），是技能型连接器：请改用 load_skill 加载 wecomcli-* / lark-* / dws / tmeet-skill 技能，再按技能说明跑 wecom-cli / lark-cli / dws / tmeet。连接状态以工具面板为准，自省失败不代表未连接。"
     fi
 fi
 

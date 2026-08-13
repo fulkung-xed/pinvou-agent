@@ -6,7 +6,12 @@ $haystack = $argsText.ToLowerInvariant()
 
 function Deny-SensitivePath {
     param([string]$Reason)
-    [Console]::Error.WriteLine("pinvou3-deny: tool '$toolName' attempted to touch sensitive path ($Reason) - blocked")
+    $message = "tool '$toolName' attempted to touch sensitive path ($Reason) - blocked"
+    [Console]::Error.WriteLine("pinvou3-deny: $message")
+    # fold_tool_call_before_results 只从 stdout JSON 取 reason 喂回模型；
+    # 纯文本 stdout 会被 passthrough，模型只能收到默认 deny 文案。
+    $payload = @{ decision = "deny"; reason = $message } | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine($payload)
     exit 2
 }
 
