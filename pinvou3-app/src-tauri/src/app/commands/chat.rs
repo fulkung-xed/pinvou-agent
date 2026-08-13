@@ -24,8 +24,9 @@ pub(crate) const IMAGE_INPUT_UNKNOWN_ERROR: &str = "image_input_unsupported: \
 /// - 未选本地识图 / 引擎已在运行 → 直接 Ok
 /// - 引擎或模型未安装 → Ok(不拦截,回落规则 1/2/3;前端弹窗引导安装)
 /// - 自动启动设为「从不」→ Ok(回落正常路由;前端弹窗三选一)
-/// - 否则 → 幂等启动并等待 Running(上限 60s);本次真正启动后 bump 会话模型
-///   revision,强制本轮 spawn 重建,使 build_engine_config 快照到本地端点。
+/// - 否则 → 幂等启动并等待 Running(跟随引擎健康窗口 HEALTH_TIMEOUT);
+///   本次真正启动后 bump 会话模型 revision,强制本轮 spawn 重建,
+///   使 build_engine_config 快照到本地端点。
 async fn ensure_local_engine_ready(
     app: &tauri::AppHandle,
     pool: &EnginePool,
@@ -69,7 +70,9 @@ async fn ensure_local_engine_ready(
             pool.mark_model_updated(&session_model);
         }
     }
-    server::wait_until_running(std::time::Duration::from_secs(60)).await
+    // 等待窗口与引擎健康窗口(server.rs HEALTH_TIMEOUT)对齐:CPU 首次加载
+    // 大图模型可能超过 60s,发送门不得比引擎自身先放弃。
+    server::wait_until_running(server::HEALTH_TIMEOUT).await
 }
 
 /// 接收用户消息并转发给 Engine。
@@ -213,14 +216,25 @@ pub(crate) async fn chat_with_reservation(
             .map_err(|error| format!("resolve image input route for {sid}: {error:#}"))?;
         // 本地识图引擎发送前保证:必须在路由判定与 spawn 之前完成——
         // resolve_vision_model_config 实时读引擎端点,且 EngineConfig 是 spawn 快照。
-        if bridge.vision_local_gate_active() {
+        // 能力判定先行:Native 能力 Supported 的模型图片直发主模型,不需要
+        // 本地引擎兜底,跳过启动(否则所有多模态模型用户都被迫装引擎)。
+        let capability = bridge.effective_image_capability();
+        if bridge.vision_local_gate_active() && capability != EffectiveImageCapability::Supported {
             let prefs = UserPrefs::load();
-            ensure_local_engine_ready(app, pool, &prefs, true, &sid, store).await?;
+            if let Err(error) =
+                ensure_local_engine_ready(app, pool, &prefs, true, &sid, store).await
+            {
+                // 已配置云端视觉模型(vision_model_id)时不硬失败:引擎启动失败
+                // 回落云端兜底路由;无兜底才上报错误。
+                if !bridge.has_vision_model() {
+                    return Err(error);
+                }
+                eprintln!(
+                    "[pinvou3-app] local engine unavailable, falling back to configured vision model: {error}"
+                );
+            }
         }
-        (
-            bridge.image_input_mode(),
-            bridge.effective_image_capability(),
-        )
+        (bridge.image_input_mode(), capability)
     } else if has_images {
         (
             ImageInputMode::VisionToolFallback,

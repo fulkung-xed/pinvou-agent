@@ -502,7 +502,11 @@ pub async fn get_image_input_capability(
             bridge
         }
     };
-    let prefer_local = bridge.vision_local_gate_active();
+    // Native 能力 Supported 的模型图片直发主模型,不需要本地引擎兜底:
+    // local_engine_state 直接 unused,前端发送门不弹安装引导、不自动启动。
+    let prefer_local = bridge.vision_local_gate_active()
+        && bridge.effective_image_capability()
+            != crate::features::assistant::image_capability::EffectiveImageCapability::Supported;
     let engine_status = crate::features::llama_engine::llama_engine_status();
     let (local_engine_model, local_engine_device) =
         crate::features::llama_engine::resolve_default_engine_plan(&bridge.prefs.advanced);
