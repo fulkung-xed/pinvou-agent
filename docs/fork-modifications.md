@@ -4,19 +4,27 @@
 > 基线、主题边界、守护指纹和同步结论以本文与 `docs/fork-policy.md` 为准。
 > English: [`docs/fork-modifications.en.md`](fork-modifications.en.md)
 
-## 0. 当前状态（2026-08-13 · v0.9.5 r6 公开基线）
+## 0. 当前状态（2026-08-14 · v0.9.5 r7 修复在途）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| 公开维护分支 | `Pinvou/CodeWhale:pinvou3-clean`，head `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02` |
+| 公开维护分支 | `Pinvou/CodeWhale:pinvou3-clean`，head `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02`（r6）；r7 修复经 `Pinvou/CodeWhale#14` 待合并 |
 | 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11`、`Pinvou/CodeWhale#12` 已合并 |
-| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r6` 均指向公开维护分支 head；`r1` 至 `r5` 保留为不可变历史标签 |
+| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r6` 均指向 r6 公开维护分支 head；`r1` 至 `r5` 保留为不可变历史标签 |
 | 旧基线备份 | tag `pinvou-v0.9.0-r4` + branch `backup/pinvou3-clean-v0.9.0-r4`，均指向 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题；公开 8 个线性提交 |
-| drift | r6 公开基线 `52 files changed, +2640/-299` |
-| 守护 | r6 新增 6 条 CodeWhale `forkguard_*` 行为测试 + Tauri/Web 展示回归；完整 guard 结果见第 4 节 |
-| 父仓适配 | gitlink、`Cargo.lock`、`EngineConfig` v0.9.5 字段适配 |
+| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题；公开 8 个线性提交 + r7 待合并 1 个 |
+| drift | r6 公开基线 `52 files changed, +2640/-299`；r7 增量 2 文件 `+67/-1` |
+| 守护 | r7 新增 2 条指纹与 1 条 CodeWhale `forkguard_*` 行为测试；完整 guard 结果见第 4 节 |
+| 父仓适配 | gitlink 暂指向 r7 修复分支 head（与 r6/PR #216 同流程），CodeWhale squash 合并后重指 `pinvou3-clean` 并打 `pinvou-v0.9.5-r7` 标签 |
+
+### r7 严格直连模型大小写路由修复（在途）
+
+- 0.8.1 稳定版在 GLM Coding Plan 国际版上选择 `glm-5.2` 时，`send_user_message` 报 `model "glm-5.2" is not served by direct provider zai`：zai 目录行使用市场拼写 `GLM-5.2`，app 保存的小写选择器经精确比较匹配不到自身行，反而在外部模型校验中撞上 modelstudio-* 的裸 wire id `glm-5.2` 被误判拒绝；自定义模型名 `glm-5.3` 不与其他 provider 裸 id 冲突，走透传故可用。
+- T1 在 `scope_selector` 为严格直连 provider（Deepseek/Zai）增加自身目录行的大小写不敏感回退：命中即以目录行规范大小写上线并携带目录限额，且发生在外部选择器误判之前；聚合器与自定义端点语义不变。该修复按 provider class 泛化，未来加入的严格直连 provider 自动获得同样行为。
+- 同类排查：`opencode_go` 白名单、zai/deepseek/minimax/mimo 别名表与 tui `validate_route` 均已小写归一化，无同类风险；本修复属通用底座问题，合并后应回馈官方上游。
+- 行为锁定：CodeWhale `forkguard_strict_direct_row_match_survives_casing_mismatch`（选择器与 saved model 两路径）与 `resolver_strict_direct_case_insensitive_match_stays_provider_scoped`（Deepseek 同样生效、外部裸 id 仍拒绝）。
+- 验证：`codewhale-config` 全量 544 通过；`codewhale-tui` route/config/client 523/507/419 通过；clippy 与 fmt 通过。
 
 ### r6 本地模型工具调用兼容修复（已验证并发布）
 

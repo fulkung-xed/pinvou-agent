@@ -7,12 +7,20 @@
 | Item | Value |
 |---|---|
 | Upstream | `v0.9.5` at `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| Public maintenance branch | `Pinvou/CodeWhale:pinvou3-clean` at `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02` |
+| Public maintenance branch | `Pinvou/CodeWhale:pinvou3-clean` at `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02` (r6); the r7 fix is pending through `Pinvou/CodeWhale#14` |
 | Merged fixes | `Pinvou/CodeWhale#9`, `Pinvou/CodeWhale#11`, and `Pinvou/CodeWhale#12` are merged |
-| Public status | `pinvou3-clean` and immutable tag `pinvou-v0.9.5-r6` both resolve to the public maintenance head; `r1` through `r5` remain immutable historical tags |
+| Public status | `pinvou3-clean` and immutable tag `pinvou-v0.9.5-r6` both resolve to the r6 public maintenance head; `r1` through `r5` remain immutable historical tags |
 | Previous baseline backup | Tag `pinvou-v0.9.0-r4` and branch `backup/pinvou3-clean-v0.9.0-r4`, both at `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| Drift | r6 public baseline: 52 files, `+2640/-299` |
-| Organization | Five long-lived topics and eight published linear commits replayed from `v0.9.5` |
+| Drift | r6 public baseline: 52 files, `+2640/-299`; r7 adds 2 files, `+67/-1` |
+| Organization | Five long-lived topics, eight published linear commits, plus one r7 commit pending merge |
+
+### r7 strict-direct model-casing route fix (in flight)
+
+- Selecting `glm-5.2` on the GLM Coding Plan global endpoint in the 0.8.1 stable build failed `send_user_message` with `model "glm-5.2" is not served by direct provider zai`: the zai catalog row uses the marketing casing `GLM-5.2`, so the app's lowercase saved selector missed the owning row under exact comparison and then collided with the bare modelstudio wire id `glm-5.2` in the foreign-selector check; a custom `glm-5.3` does not collide and passed through.
+- T1 adds a case-insensitive fallback against a strict-direct provider's own catalog rows in `scope_selector`: a hit goes on the wire with the row's documented casing and carries its catalog limits, and it runs before the foreign-selector check; aggregator and custom-endpoint semantics are unchanged. The fix is generalized by provider class, so future strict-direct providers inherit it.
+- Audit of analogous paths: the `opencode_go` allowlist, the zai/deepseek/minimax/mimo alias tables, and tui `validate_route` all normalize case already; this is a generic base problem to upstream after merge.
+- Locked by CodeWhale `forkguard_strict_direct_row_match_survives_casing_mismatch` (selector and saved-model paths) and `resolver_strict_direct_case_insensitive_match_stays_provider_scoped` (Deepseek also benefits; foreign bare ids stay rejected).
+- Verified: full `codewhale-config` 544 passing; `codewhale-tui` route/config/client 523/507/419 passing; clippy and fmt clean.
 
 ### r6 local-model tool-call compatibility fix (verified and published)
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.5 clean re-fork guard: published r6 baseline.
+# CodeWhale v0.9.5 clean re-fork guard: published r7 baseline (pending
+# pinvou3-clean squash merge of the casing-fix head below, matching the
+# paired-PR flow used by r6/PR #216).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,8 +9,8 @@ TUI="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="853cb707bbcf4f7dc4268fba6d811e0d04083f9c"
 PUBLISHED_HEAD="3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02"
-EXPECTED_HEAD="3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02"
-EXPECTED_COMMITS=8
+EXPECTED_HEAD="0719d89328432fc282025afa0294f12ab408621c"
+EXPECTED_COMMITS=9
 FAST_ONLY=0
 [[ "${1:-}" == "--fast" ]] && FAST_ONLY=1
 
@@ -53,6 +55,8 @@ fingerprints=(
   "T1|只读 worker 不触发重启回收回归      |CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn forkguard_host_readonly_worker_projection_preserves_live_status"
   "T1|宿主显式 route limits               |CodeWhale/crates/tui/src/route_runtime.rs|pub fn resolve_runtime_route_with_limits("
   "T1|embedding route wire alias 回归      |CodeWhale/crates/tui/src/route_runtime.rs|fn forkguard_embedding_route_limits_preserve_wire_alias"
+  "T1|严格直连自身目录行大小写回退          |CodeWhale/crates/config/src/route/resolver.rs|let own_row_case_insensitive = class == ProviderClass::StrictDirect;"
+  "T1|严格直连大小写回退行为回归            |CodeWhale/crates/config/src/route/tests.rs|fn forkguard_strict_direct_row_match_survives_casing_mismatch"
   "T1|运行时会话快照不推断工具崩溃        |CodeWhale/crates/tui/src/session_manager.rs|fn forkguard_runtime_session_snapshot_preserves_in_flight_tool_call"
   "T1|显式重启恢复可观测且幂等            |CodeWhale/crates/tui/src/session_manager.rs|fn forkguard_explicit_session_recovery_is_reported_and_idempotent_after_save"
 
