@@ -3185,7 +3185,6 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         );
       };
       const renderContent = () => {
-      const renderContent = () => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
