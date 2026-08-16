@@ -158,16 +158,17 @@ pub(crate) fn build_args(
         "--ubatch-size".into(),
         "1024".into(),
         // FlashAttention：图像 token 多时显著降低 KV 访存与显存占用。
+        // 注意该参数必须带值（on|off|auto），裸写会被新版 llama.cpp 拒绝启动。
         "--flash-attn".into(),
+        "on".into(),
         // KV cache q8_0 量化：视觉任务 KV 常驻占用大，q8_0 精度损失可忽略、
         // 内存近减半（8GB 内存机器跑 2B 档的保命项）。
         "--cache-type-k".into(),
         "q8_0".into(),
         "--cache-type-v".into(),
         "q8_0".into(),
-        // mlock：模型常驻物理内存，防系统换页导致解码中途卡顿；
-        // 权限/内存不足时 llama.cpp 仅告警继续运行，无失败风险。
-        "--mlock".into(),
+        // 不传 --mlock：Windows 上 VirtualLock 受进程工作集限制，1GB+ 模型
+        // 会直接 mmap assert 崩溃（真机实测），收益不抵风险；mmap 默认即可。
         "-ngl".into(),
         ngl.into(),
         "--no-webui".into(),
@@ -733,7 +734,8 @@ mod tests {
             assert!(text.windows(2).any(|w| w[0] == "-ngl" && w[1] == expected_ngl));
             assert!(text.iter().any(|a| a == "--no-webui"));
             // PR3 启动参数调优：物理核线程数 / batch 1024 / flash-attn /
-            // KV q8_0 / mlock（缺一项即回归，逐项断言）。
+            // KV q8_0（缺一项即回归，逐项断言）。--mlock 刻意不传（Windows
+            // VirtualLock 工作集限制会崩，见 build_args 注释）。
             assert!(
                 text.windows(2)
                     .any(|w| w[0] == "-t" && w[1].parse::<usize>().is_ok()),
@@ -741,10 +743,10 @@ mod tests {
             );
             assert!(text.windows(2).any(|w| w[0] == "--batch-size" && w[1] == "1024"));
             assert!(text.windows(2).any(|w| w[0] == "--ubatch-size" && w[1] == "1024"));
-            assert!(text.iter().any(|a| a == "--flash-attn"));
+            assert!(text.windows(2).any(|w| w[0] == "--flash-attn" && w[1] == "on"));
             assert!(text.windows(2).any(|w| w[0] == "--cache-type-k" && w[1] == "q8_0"));
             assert!(text.windows(2).any(|w| w[0] == "--cache-type-v" && w[1] == "q8_0"));
-            assert!(text.iter().any(|a| a == "--mlock"));
+            assert!(!text.iter().any(|a| a == "--mlock"));
         }
     }
 
