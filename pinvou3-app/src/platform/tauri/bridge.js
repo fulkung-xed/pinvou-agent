@@ -894,6 +894,7 @@
   var prefillComposer = chatFeature.prefillComposer;
   var removeQueued = chatFeature.removeQueued;
   var steer = chatFeature.steer;
+  var interruptAndSend = chatFeature.interruptAndSend;
   var summonPinvou = chatFeature.summonPinvou;
   var inspectPinvou = chatFeature.inspectPinvou;
   var recordPinvouReview = chatFeature.recordPinvouReview;
@@ -2257,6 +2258,7 @@
       prefillComposer: prefillComposer,
       removeQueued: removeQueued,
       steer: steer,
+      interruptAndSend: interruptAndSend,
       cancelGeneration: cancelGeneration,
       cancelShellTask: cancelShellTask,
     },
