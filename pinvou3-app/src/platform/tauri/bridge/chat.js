@@ -12,6 +12,8 @@
     var personaPlaceholderTitles = context.personaPlaceholderTitles;
     var renderMarkdown = context.renderMarkdown;
     var safeConsoleInfo = context.safeConsoleInfo;
+    var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
+    var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
     var bt = context.bt;
     var isDefaultChatTitle = context.isDefaultChatTitle;
     var runSyncOnSession = context.runSyncOnSession;
@@ -223,6 +225,7 @@
     var submittedUserItemId = 0;
     var submittedStreamId = 0;
     if (turnOwnerBuffer && turnOwnerBuffer.remoteTurnActive) {
+      recordAuthoritySyncDiagnostic("local_send_blocked_by_remote_sync", authoritySyncBufferSnapshot(sid, turnOwnerBuffer));
       return Promise.reject(new Error(bt("sessionSyncingTurn")));
     }
     if (turnOwnerBuffer) {
@@ -230,6 +233,9 @@
       turnOwnerBuffer.remoteTurnActive = false;
       turnOwnerBuffer.remoteTerminalSeen = false;
       turnOwnerBuffer.remoteCommittedRevision = "";
+      recordAuthoritySyncDiagnostic("local_turn_claimed", Object.assign({
+        operation: "send",
+      }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
     }
     runSyncOnSession(sid, function () {
       state.chatItems = state.chatItems.filter(function (item) {
@@ -260,6 +266,9 @@
     publishRemoteUserMessage(sid, displayText, meta && meta.remoteClientMessageId);
     return invoke("chat", { message: text, attachments: attachmentsPayload, sessionId: sid, restrictTools: !!restrictTools })
       .then(function () {
+        recordAuthoritySyncDiagnostic("local_turn_admitted", Object.assign({
+          operation: "send",
+        }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
         if (turnOwnerBuffer) turnOwnerBuffer.deferredRemoteUserEvent = null;
         if (meta && meta.pinvouScene) {
           runSyncOnSession(sid, function () {
@@ -276,6 +285,11 @@
         emitPetEvent("pet:turn_end", sid);
         var errorText = String(err && err.message ? err.message : err || "");
         var concurrentTurn = errorText.indexOf("session_turn_in_progress") >= 0;
+        recordAuthoritySyncDiagnostic("local_turn_admission_failed", Object.assign({
+          operation: "send",
+          concurrent_turn: concurrentTurn,
+          error: errorText,
+        }, authoritySyncBufferSnapshot(sid, turnOwnerBuffer)));
         if (turnOwnerBuffer) turnOwnerBuffer.localTurnOwned = false;
         runSyncOnSession(sid, function () {
           state.messages = state.messages.filter(function (message) { return message !== submittedMessage; });
@@ -286,7 +300,9 @@
           state.busy = false;
           stopThinking();
         });
-        if (concurrentTurn && turnOwnerBuffer) markRemoteTurn(sid, turnOwnerBuffer);
+        if (concurrentTurn && turnOwnerBuffer) {
+          markRemoteTurn(sid, turnOwnerBuffer, false, "local_send_concurrent_turn");
+        }
         runSyncOnSession(sid, function () {
           // 稳定错误码(如 image_input_unsupported)按码替换为三语指引,而非剥前缀
           // 透传后端硬编码中文——英/日界面不该看到中文结论;文案与 ChatView
@@ -375,6 +391,9 @@
       return { accepted: true, queued: true };
     }
     if (targetBuffer && targetBuffer.remoteTurnActive && !(await reconcileRemoteTurn(sid))) {
+      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
+        operation: "send_to_session",
+      }, authoritySyncBufferSnapshot(sid, targetBuffer)));
       throw new Error(bt("targetSessionSyncing"));
     }
     targetBuffer = getBuffer(sid);
@@ -481,6 +500,9 @@
     if (activeTurnBuffer && activeTurnBuffer.remoteTurnActive &&
         !(await reconcileRemoteTurn(sid))) {
       if (state.activeSessionId !== sid) return;
+      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
+        operation: "send",
+      }, authoritySyncBufferSnapshot(sid, activeTurnBuffer)));
       addAuthoritySyncNotice(bt("remoteTurnSyncing"));
       return;
     }

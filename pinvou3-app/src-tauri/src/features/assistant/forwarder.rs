@@ -385,15 +385,12 @@ pub(crate) fn spawn_event_forwarder(
                             Ok(Ok(saved)) => {
                                 chat_persistence_error = None;
                                 if let Ok(revision) = transcript_revision(&saved.messages) {
-                                    let payload = json!({
-                                        "session_id": session_id,
-                                        "transcript_revision": revision,
-                                    });
-                                    let _ = app.emit("chat:transcript_committed", payload.clone());
-                                    crate::features::remote_control::forward_app_event(
+                                    emit_transcript_committed(
                                         &app,
-                                        "chat:transcript_committed",
-                                        payload,
+                                        &session_id,
+                                        revision,
+                                        "engine_state_update",
+                                        saved.messages.len(),
                                     );
                                 }
                             }
@@ -635,16 +632,12 @@ pub(crate) fn spawn_event_forwarder(
                                 Ok(Ok(saved)) => {
                                     chat_persistence_error = None;
                                     if let Ok(revision) = transcript_revision(&saved.messages) {
-                                        let payload = json!({
-                                            "session_id": session_id,
-                                            "transcript_revision": revision,
-                                        });
-                                        let _ =
-                                            app.emit("chat:transcript_committed", payload.clone());
-                                        crate::features::remote_control::forward_app_event(
+                                        emit_transcript_committed(
                                             &app,
-                                            "chat:transcript_committed",
-                                            payload,
+                                            &session_id,
+                                            revision,
+                                            "terminal_fallback",
+                                            saved.messages.len(),
                                         );
                                     }
                                 }
