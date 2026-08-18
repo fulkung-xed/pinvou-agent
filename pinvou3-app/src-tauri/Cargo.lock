@@ -4908,7 +4908,7 @@ dependencies = [
  "flume",
  "if-addrs 0.15.0",
  "log",
- "mio 1.2.0",
+ "mio",
  "socket-pktinfo",
  "socket2",
 ]
