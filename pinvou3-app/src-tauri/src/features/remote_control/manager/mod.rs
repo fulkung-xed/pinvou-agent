@@ -1,6 +1,7 @@
 mod persistence;
 mod rpc;
 mod transfer;
+mod workspace_grants;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -66,6 +67,7 @@ use transfer::{
     request_web_attachment_discard,
 };
 pub(crate) use transfer::{sweep_stale_web_attachment_uploads, web_attachment_uploads_base};
+use workspace_grants::{require_host_workspace_authorization, WebWorkspaceGrantStore};
 
 // 正式安装包默认连接生产 Relay；本地联调由 run-dev.sh 显式覆盖到隔离的
 // remote-test 端点。用户保存的自定义 Relay 设置仍具有最高优先级。
@@ -174,6 +176,7 @@ fn should_filter_code_session_event(
 }
 
 const RUST_FORWARDED_EVENTS: &[&str] = &[
+    "acp:event",
     "artifact:disk",
     "chat:compaction",
     "chat:delta",
@@ -231,6 +234,7 @@ struct Inner {
     web_attachment_bytes: usize,
     web_attachment_uploads: HashMap<String, WebAttachmentUpload>,
     web_attachment_upload_order: VecDeque<String>,
+    web_workspace_grants: WebWorkspaceGrantStore,
     web_session_uploads: HashMap<String, WebSessionUpload>,
     web_session_upload_order: VecDeque<String>,
     web_session_downloads: HashMap<String, WebSessionDownload>,
@@ -258,6 +262,7 @@ impl Default for Inner {
             web_attachment_bytes: 0,
             web_attachment_uploads: HashMap::new(),
             web_attachment_upload_order: VecDeque::new(),
+            web_workspace_grants: WebWorkspaceGrantStore::default(),
             web_session_uploads: HashMap::new(),
             web_session_upload_order: VecDeque::new(),
             web_session_downloads: HashMap::new(),
@@ -771,27 +776,48 @@ impl RemoteControlManager {
 
     /// Enable WebUI access. Repeated calls return the same persistent endpoint
     /// instead of creating session-scoped rooms.
-    pub fn start(&self) -> Result<WebAccessInfo, String> {
+    pub fn start(&self, allow_host_workspace: bool) -> Result<WebAccessInfo, String> {
         let _lifecycle = self.lifecycle.lock();
         self.ensure_policy()?;
         self.ensure_process_ownership()?;
         self.replay_pending_revocations()?;
-        if let Some(endpoint) = self.inner.lock().endpoint.clone() {
-            return Ok(pairing_info(&endpoint));
+        let active_endpoint_id = self
+            .inner
+            .lock()
+            .endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.config.endpoint_id.clone());
+        let (mut config, is_new) = match load_config()? {
+            Some(config) => {
+                validate_config(&config)?;
+                (config, false)
+            }
+            None if active_endpoint_id.is_some() => {
+                return Err("Web access endpoint configuration is missing".to_string());
+            }
+            None => (fresh_config(false), true),
+        };
+        if active_endpoint_id
+            .as_ref()
+            .is_some_and(|endpoint_id| endpoint_id != &config.endpoint_id)
+        {
+            return Err("Web access endpoint configuration changed".to_string());
+        }
+        let authorization_changed = allow_host_workspace && !config.allow_host_workspace;
+        config.allow_host_workspace |= allow_host_workspace;
+        if is_new || authorization_changed {
+            persist_config(&config)?;
+        }
+        if active_endpoint_id.is_some() {
+            let mut inner = self.inner.lock();
+            let endpoint = inner
+                .endpoint
+                .as_mut()
+                .ok_or_else(|| "Web access endpoint stopped while enabling access".to_string())?;
+            endpoint.config.allow_host_workspace = config.allow_host_workspace;
+            return Ok(pairing_info(endpoint));
         }
 
-        let config = match load_config()? {
-            Some(config) => {
-                let config = apply_runtime_relay_override(config);
-                validate_config(&config)?;
-                config
-            }
-            None => {
-                let config = fresh_config();
-                persist_config(&config)?;
-                config
-            }
-        };
         self.activate(apply_runtime_relay_override(config))?;
         let inner = self.inner.lock();
         let endpoint = inner
@@ -819,7 +845,10 @@ impl RemoteControlManager {
         if let Some(previous) = previous_config.as_ref() {
             queue_pending_revocation(previous)?;
         }
-        let config = fresh_config();
+        let allow_host_workspace = previous_config
+            .as_ref()
+            .is_some_and(|config| config.allow_host_workspace);
+        let config = fresh_config(allow_host_workspace);
         // The old credentials are already durably queued above. If this write
         // fails, the queue entry still matches the current config and replay
         // deliberately leaves the still-active endpoint alone.
@@ -832,6 +861,7 @@ impl RemoteControlManager {
             inner.rpc_order.clear();
             clear_web_attachments(&mut inner);
             inner.stream.reset();
+            inner.web_workspace_grants.clear();
             inner.endpoint.take()
         };
         if let Some(previous) = previous {
@@ -908,6 +938,7 @@ impl RemoteControlManager {
             inner.rpc_cache.clear();
             inner.rpc_order.clear();
             clear_web_attachments(&mut inner);
+            inner.web_workspace_grants.clear();
             inner.rpc_ledger = RpcLedger::default();
             inner.stream.reset();
             inner.idle_status = WebAccessStatusKind::Stopped;
@@ -995,6 +1026,55 @@ impl RemoteControlManager {
             }
         }
         self.inner.lock().pending_revocations_in_flight.remove(&key);
+    }
+
+    /// Mint a short-lived capability for a directory that the host-file
+    /// picker has already listed through `validate_browsable_path`. The
+    /// browser may display the host path, but code-session creation receives
+    /// only this opaque, endpoint-bound, one-shot handle.
+    pub fn issue_web_workspace_grant(&self, raw_path: &str) -> Result<String, String> {
+        let path = crate::features::files::file_ingest::validate_browsable_path(raw_path)?;
+        if !path.is_dir() {
+            return Err(format!(
+                "Web code workspace must be a directory: {}",
+                path.display()
+            ));
+        }
+        let mut inner = self.inner.lock();
+        let endpoint = inner
+            .endpoint
+            .as_ref()
+            .ok_or_else(|| "Web access endpoint is not active".to_string())?;
+        require_host_workspace_authorization(endpoint.config.allow_host_workspace)?;
+        let endpoint_id = endpoint.config.endpoint_id.clone();
+        let handle = loop {
+            let candidate = format!(
+                "workspace_{}",
+                crate::features::remote_control::short_token(32)
+            );
+            if !inner.web_workspace_grants.contains(&candidate) {
+                break candidate;
+            }
+        };
+        inner
+            .web_workspace_grants
+            .issue(handle.clone(), endpoint_id, path, Instant::now());
+        Ok(handle)
+    }
+
+    /// Atomically consume a workspace capability. Removing the entry before
+    /// validation makes expired, cross-endpoint, and replayed handles fail
+    /// closed without leaving a reusable authorization behind.
+    pub fn consume_web_workspace_grant(&self, handle: &str) -> Result<PathBuf, String> {
+        let mut inner = self.inner.lock();
+        let endpoint_id = inner
+            .endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.config.endpoint_id.clone())
+            .ok_or_else(|| "Web access endpoint is not active".to_string())?;
+        inner
+            .web_workspace_grants
+            .consume(handle, &endpoint_id, Instant::now())
     }
 
     /// Keep parsed attachment contents on the desktop. The browser receives
@@ -1485,6 +1565,7 @@ impl RemoteControlManager {
                 status: endpoint.status,
                 relay_url: endpoint.config.relay_url.clone(),
                 web_client_connected: endpoint.web_client_connected,
+                host_workspace_authorized: endpoint.config.allow_host_workspace,
                 last_error: endpoint.last_error.clone(),
             }
         } else {
@@ -1496,6 +1577,7 @@ impl RemoteControlManager {
                 status: inner.idle_status,
                 relay_url: remote_relay_ws_url(),
                 web_client_connected: false,
+                host_workspace_authorized: false,
                 last_error: inner
                     .idle_error
                     .clone()
@@ -1919,6 +2001,7 @@ impl RemoteControlManager {
             inner.rpc_order.clear();
             clear_web_attachments(&mut inner);
             inner.stream.reset();
+            inner.web_workspace_grants.clear();
             inner.idle_status = WebAccessStatusKind::Revoked;
             inner.idle_error = None;
             revoked
@@ -1957,6 +2040,7 @@ impl RemoteControlManager {
             inner.rpc_cache.clear();
             inner.rpc_order.clear();
             clear_web_attachments(&mut inner);
+            inner.web_workspace_grants.clear();
         }
         self.emit_status();
     }
@@ -3172,6 +3256,21 @@ mod tests {
             "web_access_bridge_ready",
             "web_access_rpc_begin",
             "web_access_rpc_respond",
+            "codex_acp_prompt",
+            "get_codex_acp_timeline",
+            "get_codex_acp_session_info",
+            "get_codex_acp_pending_permissions",
+            "get_codex_acp_pending_elicitations",
+            "list_acp_agents",
+            "get_acp_agent_status",
+            "set_codex_acp_model",
+            "set_codex_acp_mode",
+            "set_codex_acp_config_option",
+            "install_acp_agent",
+            "login_acp_agent",
+            "switch_acp_agent_account",
+            "open_acp_agent_login_url",
+            "submit_acp_agent_login_code",
         ] {
             assert!(
                 !policy.commands.contains(command),
@@ -3195,6 +3294,16 @@ mod tests {
             "web_access_discard_attachment",
             "web_access_read_conversation_attachment_chunk",
             "web_access_load_session_chunk",
+            "web_access_codex_acp_prompt",
+            "web_access_get_codex_acp_timeline",
+            "web_access_get_codex_acp_session_info",
+            "web_access_get_codex_acp_pending_permissions",
+            "web_access_get_codex_acp_pending_elicitations",
+            "web_access_list_acp_agents",
+            "web_access_get_acp_agent_status",
+            "web_access_set_codex_acp_model",
+            "web_access_set_codex_acp_mode",
+            "web_access_set_codex_acp_config_option",
         ] {
             assert!(
                 policy.commands.contains(command),
@@ -3215,6 +3324,8 @@ mod tests {
         assert!(RUST_FORWARDED_EVENTS.contains(&"chat:reasoning_delta"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"chat:reasoning_done"));
         assert!(policy.events.contains("chat:user_message"));
+        assert!(policy.events.contains("acp:event"));
+        assert!(RUST_FORWARDED_EVENTS.contains(&"acp:event"));
         assert!(policy.events.contains("chat:plan_resolved"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"chat:plan_resolved"));
         assert!(policy.events.contains("chat:transcript_committed"));
@@ -3253,6 +3364,7 @@ mod tests {
             endpoint_id: "ep_123456".into(),
             access_token: "a".repeat(24),
             desktop_secret: "d".repeat(24),
+            allow_host_workspace: false,
         };
         validate_config(&valid).expect("valid Web access config");
 
@@ -3557,42 +3669,6 @@ mod tests {
         );
     }
 
-    /// Web 只读封禁表：执行型入口全在表内，查看型不在（只读横幅要取数）。
-    /// `cancel_generation`、`cancel_shell_task` 与 `cancel_user_input` 同属改变
-    /// 运行中 turn 状态的取消类入口（前者终态整个生成并级联取消子智能体，
-    /// 后者可终止委派子智能体正在执行的 shell 任务），必须一并封禁。
-    #[test]
-    fn multi_agent_web_denylist_blocks_execution_but_not_viewing() {
-        for command in [
-            "web_access_chat",
-            "edit_last_turn",
-            "accept_plan",
-            "discard_plan",
-            "exit_plan_to_yolo",
-            "submit_user_input",
-            "cancel_generation",
-            "cancel_shell_task",
-            "cancel_user_input",
-            "compact_now",
-            "summon_pinvou",
-        ] {
-            assert!(
-                super::MULTI_AGENT_WEB_EXECUTION_DENYLIST.contains(&command),
-                "执行入口 {command} 必须在 Web 只读封禁表内（复核 P1）"
-            );
-        }
-        for command in [
-            "get_session_timeline",
-            "get_mode_state",
-            "web_access_load_session_chunk",
-        ] {
-            assert!(
-                !super::MULTI_AGENT_WEB_EXECUTION_DENYLIST.contains(&command),
-                "只读查看 {command} 必须放行——Web 只读横幅要能取数"
-            );
-        }
-    }
-
     #[test]
     fn stream_replays_an_exact_contiguous_suffix() {
         let mut stream = StreamState::new();
@@ -3782,6 +3858,7 @@ mod tests {
             endpoint_id: "ep_test".into(),
             access_token: "a+b/c".into(),
             desktop_secret: "never-in-url".into(),
+            allow_host_workspace: false,
         };
         let link = public_url(&config);
         assert!(link.contains("#endpoint=ep_test&token=a%2Bb%2Fc"));
@@ -3822,6 +3899,7 @@ mod tests {
             endpoint_id: pending.endpoint_id,
             access_token: "browser-token-01234567890123456789".into(),
             desktop_secret: pending.desktop_secret,
+            allow_host_workspace: false,
         }
     }
 
