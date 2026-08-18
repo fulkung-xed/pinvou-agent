@@ -159,7 +159,7 @@ pub struct Pinvou3Bridge {
     pub bundle: Pinvou3Bundle,
     pub workspace: PathBuf,
     /// 本 engine 绑定的 session 锁定模型(per-session 不同模型)。None = 用 prefs 全局
-    /// active。EnginePool spawn 时按该 session 的 model_id 注入(见 `with_session_model`)。
+    /// active。EnginePool spawn 时按该 session 的 model_id 注入。
     pub session_model: Option<SavedModel>,
     /// RuntimeModelProvider 为本次引擎准备的内存凭据。Some 时是最终值，不能再被
     /// 环境变量或本地凭据库覆盖；Debug 由包装类型强制脱敏。
@@ -375,7 +375,6 @@ impl Pinvou3Bridge {
     /// (通常是 scenario 自己的 tempdir),而不是 `paths::user_home_dir()`。
     /// 让 L1 真 vLLM dialog harness 能给每个 scenario 一个隔离的产出目录,
     /// 避免污染用户 $HOME 也避免 scenario 之间互相干扰。
-    #[allow(dead_code)] // L1 runner 接入前临时 unused
     pub fn boot_with_workspace(ws: PathBuf) -> Result<Self> {
         let mut this = Self::boot()?;
         this.workspace = ws;
@@ -684,13 +683,6 @@ impl Pinvou3Bridge {
     /// 用它克隆→改 model 名→塞回 session_model,实现「请求用 vLLM 实际名字」。
     pub fn effective_model_owned(&self) -> Option<SavedModel> {
         self.effective_model().cloned()
-    }
-
-    /// 克隆一份 bridge 并绑定 per-session 模型(EnginePool spawn 时按 session model_id 注入)。
-    pub fn with_session_model(&self, model: Option<SavedModel>) -> Self {
-        let mut b = self.clone();
-        b.session_model = model;
-        b
     }
 
     pub fn provider(&self) -> String {
@@ -2278,31 +2270,16 @@ mod tests {
             bridge.audit_workspace("sess-code-temp", &execution),
             execution
         );
-    }
 
-    #[test]
-    fn session_roots_exposes_both_roots_for_every_session_kind() {
-        let mut bridge = fixture_bridge();
-        let private_plain = crate::platform::paths::session_workspace_dir("sess-plain");
-        // 未注入 resolver：普通会话两个根一致，均为会话私有目录。
-        let roots = bridge.session_roots("sess-plain");
-        assert_eq!(roots.execution, private_plain);
-        assert_eq!(roots.ledger, private_plain);
-
-        let project = std::env::temp_dir().join("pinvou3-session-roots-test-project");
-        let hit = project.clone();
-        bridge.set_execution_root_resolver(std::sync::Arc::new(move |session_id: &str| {
-            (session_id == "sess-code-project").then(|| hit.clone())
-        }));
-
-        // 绑项目的原生代码会话：执行根 = 项目目录，账本根 = 会话私有目录。
+        // session_roots() 结构体取法与上面的 workspace/audit 双取法同源
+        // (原 session_roots_exposes_both_roots_for_every_session_kind 的断言):
+        // 命中项目的会话 execution=项目、ledger=会话私有;其余会话两根一致。
         let roots = bridge.session_roots("sess-code-project");
         assert_eq!(roots.execution, project);
         assert_eq!(
             roots.ledger,
             crate::platform::paths::session_workspace_dir("sess-code-project")
         );
-        // 未命中（普通 / 临时代码）：执行根与账本根一致，均为会话私有目录。
         for sid in ["sess-plain", "sess-code-temp"] {
             let roots = bridge.session_roots(sid);
             let private = crate::platform::paths::session_workspace_dir(sid);
@@ -2722,54 +2699,6 @@ mod tests {
         assert_eq!(shaped, tools);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn sensitive_firewall_hook_uses_platform_script() {
-        let bridge = fixture_bridge();
-        let hooks = bridge.build_hooks_config();
-        let command = &hooks.hooks[0].command;
-
-        #[cfg(windows)]
-        {
-            assert!(
-                command.contains("powershell.exe") && command.contains("deny_sensitive_paths.ps1"),
-                "Windows sensitive firewall hook must use PowerShell, got: {command}"
-            );
-            assert!(
-                !command.contains("bash"),
-                "Windows sensitive firewall hook must not require bash, got: {command}"
-            );
-        }
-
-        #[cfg(not(windows))]
-        {
-            assert!(
-                command.starts_with("bash ") && command.contains("deny_sensitive_paths.sh"),
-                "non-Windows sensitive firewall hook must use bash script, got: {command}"
-            );
-        }
-    }
-
-    #[test]
-    fn engine_config_registers_sensitive_firewall_hook() {
-        let bridge = fixture_bridge();
-        let config = bridge.build_engine_config();
-        let executor = config
-            .hook_executor
-            .as_ref()
-            .expect("engine config must register pinvou3 sensitive firewall hook");
-        let hooks = executor.config();
-        assert!(hooks.enabled);
-        assert!(hooks.hooks.iter().any(|hook| {
-            hook.name.as_deref() == Some("pinvou3-sensitive-firewall")
-                && hook.event == HookEvent::ToolCallBefore
-        }));
-        #[cfg(unix)]
-        assert!(hooks.hooks.iter().any(|hook| {
-            hook.name.as_deref() == Some("pinvou3-cli-shell-env")
-                && hook.event == HookEvent::ShellEnv
-        }));
     }
 
     fn set_active_model(
@@ -3832,6 +3761,8 @@ mod tests {
     /// gating: 纯对话元卡(restrict_tools=true)→ 本轮 allowed_tools=Some(空表)=零工具;
     /// 普通卡 / 未加持(false)→ Pinvou 基础白名单。这是卡牌制造专家"只产可收藏的内联卡、绝不
     /// 写文件"的**工具层**强制手段(底座从 schema 删工具),不靠模型自觉遵守 prompt。
+    /// R-2 注:op 链路不感知会话类型,该白名单对 code 会话同样生效(前端入口见
+    /// CodexAcpView.jsx `restrictTools` 注释,S-1 分化时按策略驱动)。
     #[test]
     fn build_send_message_op_restricts_tools_for_conversational_persona() {
         let bridge = fixture_bridge();
@@ -3858,18 +3789,15 @@ mod tests {
             Some(crate::features::assistant::tool_policy::allowed_tool_names()),
             "普通卡 / 未加持必须恢复 Pinvou 基础白名单"
         );
-    }
 
-    /// R-2:逐轮工具白名单对 code 会话同样生效——op 链路不感知会话类型,
-    /// `restrict_tools=true` 时空白名单把工具挡在模型视野外;false 时恢复 Pinvou 白名单。
-    /// 前端入口见 CodexAcpView.jsx `restrictTools` 注释(S-1 分化时按策略驱动)。
-    #[test]
-    fn build_send_message_op_restrict_tools_also_applies_to_code_sessions() {
+        // code 会话同链路生效(原 build_send_message_op_restrict_tools_also_
+        // applies_to_code_sessions 的断言):op 链路不感知会话类型,S-1 分化若
+        // 往这里加会话类型分支,下面两条必须报警。
         let mut bridge = fixture_bridge();
         bridge.set_code_session_predicate(std::sync::Arc::new(|session_id: &str| {
             session_id == "sess-code-project"
         }));
-        let allowed = |restrict| match bridge
+        let allowed_code = |restrict| match bridge
             .build_send_message_op(
                 "sess-code-project",
                 "hi".to_string(),
@@ -3883,12 +3811,12 @@ mod tests {
             other => panic!("期望 SendMessage,得到 {other:?}"),
         };
         assert_eq!(
-            allowed(true),
+            allowed_code(true),
             Some(Vec::new()),
             "code 会话逐轮白名单入口必须生效(R-2)"
         );
         assert_eq!(
-            allowed(false),
+            allowed_code(false),
             Some(crate::features::assistant::tool_policy::allowed_tool_names()),
             "code 会话未限制时必须恢复 Pinvou 基础白名单"
         );
@@ -4276,12 +4204,34 @@ mod tests {
             "Engine hooks 与 exec_shell shell_env 必须共享同一 executor"
         );
         let hooks = engine_executor.config();
+        assert!(hooks.enabled, "hook executor 必须启用");
         assert!(
             hooks.hooks.iter().any(|hook| {
                 hook.event == HookEvent::ToolCallBefore
                     && hook.name.as_deref() == Some("pinvou3-sensitive-firewall")
             }),
             "敏感目录硬拦截 hook 必须保留"
+        );
+        // 平台脚本命令契约(原 sensitive_firewall_hook_uses_platform_script 的断言):
+        // Windows 用 PowerShell 脚本,其余平台用 bash 脚本。
+        let firewall_command = hooks
+            .hooks
+            .iter()
+            .find(|hook| hook.name.as_deref() == Some("pinvou3-sensitive-firewall"))
+            .map(|hook| hook.command.as_str())
+            .unwrap_or_default();
+        #[cfg(windows)]
+        assert!(
+            firewall_command.contains("powershell.exe")
+                && firewall_command.contains("deny_sensitive_paths.ps1")
+                && !firewall_command.contains("bash"),
+            "Windows sensitive firewall hook must use PowerShell, got: {firewall_command}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            firewall_command.starts_with("bash ")
+                && firewall_command.contains("deny_sensitive_paths.sh"),
+            "non-Windows sensitive firewall hook must use bash script, got: {firewall_command}"
         );
         #[cfg(unix)]
         assert!(
@@ -4645,30 +4595,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// OpenaiCompatible preset 必须让用户提供的模型名生效，而不是回退到默认。
-    /// 9e296c4 模型列表化后,legacy preset+custom_* 经 `migrate_models()`(每次
-    /// `UserPrefs::load()` 都跑)物化成 active SavedModel 才生效——测试显式调一次模拟之。
-    #[test]
-    fn openai_compatible_uses_user_provided_name() {
-        let (_lock, _env) = locked_env(&[
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_PROVIDER",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
-        ]);
-        let mut bridge = fixture_bridge();
-        set_active_model(
-            &mut bridge,
-            ModelPreset::OpenaiCompatible,
-            "my-custom-model",
-            "https://api.openai.com/v1",
-            "",
-        );
-        assert_eq!(bridge.model(), "my-custom-model");
-        assert_eq!(bridge.provider(), "openai");
-    }
-
-    /// OpenaiCompatible preset 必须透传任意模型名（如自定义兼容端点模型）。
+    /// OpenaiCompatible preset 必须透传任意模型名（如自定义兼容端点模型）,
+    /// 而不是回退到默认。9e296c4 模型列表化后,legacy preset+custom_* 经
+    /// `migrate_models()`(每次 `UserPrefs::load()` 都跑)物化成 active SavedModel
+    /// 才生效——测试显式调一次模拟之。
     #[test]
     fn openai_compatible_passthrough_model_name() {
         let (_lock, _env) = locked_env(&[
@@ -4882,33 +4812,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn moonshot_model_defaults_to_high_reasoning_effort() {
-        let (_lock, _env) = locked_env(&[
-            "DEEPSEEK_MODEL",
-            "DEEPSEEK_PROVIDER",
-            "DEEPSEEK_BASE_URL",
-            "DEEPSEEK_API_KEY",
-        ]);
-        let mut bridge = fixture_bridge();
-        set_active_model(
-            &mut bridge,
-            ModelPreset::Kimi,
-            "moonshot-v1-8k",
-            "https://api.moonshot.cn/v1",
-            "sk-test",
-        );
-
-        assert_eq!(bridge.provider(), "moonshot");
-        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("high"));
-        assert_eq!(
-            bridge.build_dt_config().reasoning_effort.as_deref(),
-            Some("high")
-        );
-    }
-
     /// 用户显式设置的 `SavedModel.reasoning_effort` 必须覆盖 provider 默认
     /// （此处验证 off 覆盖 moonshot 默认 high），且三个注入点保持一致。
+    /// 注:provider 默认值本身(moonshot→high)由
+    /// known_reasoning_routes_preserve_provider_identity_and_stream_shape 的
+    /// Kimi 首case覆盖;未显式设置时 request_reasoning_effort() 的默认注入
+    /// 断言保留在下方本测试的 baseline 段。
     #[test]
     fn explicit_reasoning_effort_overrides_provider_default() {
         let (_lock, _env) = locked_env(&[
@@ -4925,6 +4834,11 @@ mod tests {
             "https://api.moonshot.cn/v1",
             "sk-test",
         );
+
+        // baseline:未显式设置时 Moonshot 默认 high
+        // (原 moonshot_model_defaults_to_high_reasoning_effort 的默认断言)。
+        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("high"));
+
         bridge.prefs.advanced.saved_models[0].reasoning_effort = Some("off".to_string());
 
         assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("off"));

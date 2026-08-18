@@ -906,7 +906,7 @@ fn agentic_guide_mentions_collection_and_kb_search() {
     assert!(g.contains("不要对 XLSX/"));
     assert!(g.contains("绝不凭记忆编造"));
     assert!(g.contains("《团队规范》"));
-    assert!(build_kb_agentic_guide(&[]).contains("《本地知识集》"));
+    assert!(build_kb_agentic_guide(&[]).contains("《知识集》"));
 }
 
 #[test]
@@ -1432,7 +1432,7 @@ fn validate_user_path_blocks_ssh() {
 /// L2-3: 系统级敏感前缀拦截 — /etc/shadow 等被列在 BLOCKED_PREFIXES。
 #[test]
 fn validate_user_path_blocks_etc_shadow() {
-    if !crate::platform::capabilities::is_unix() {
+    if !cfg!(unix) {
         return;
     }
     let result = validate_user_path("/etc/shadow");

@@ -98,16 +98,6 @@ fn task_workspace(store: &SessionStore, task_id: &str) -> PathBuf {
 }
 
 #[test]
-fn create_new_persists_and_lists() {
-    let (store, _g) = isolated_store();
-    let s = store
-        .create_new("/model".into(), None, std::env::temp_dir())
-        .expect("create");
-    let list = store.list().expect("list");
-    assert!(list.iter().any(|m| m.id == s.metadata.id));
-}
-
-#[test]
 fn session_roots_plain_session_shares_private_root() {
     let (store, _g) = isolated_store();
     let s = store
@@ -1272,26 +1262,6 @@ fn update_messages_rejects_unrelated_short_overwrite() {
 }
 
 #[test]
-fn transcript_cas_commits_and_returns_content_revision() {
-    let (store, _g) = isolated_store();
-    let session = store
-        .create_new("/model".into(), None, std::env::temp_dir())
-        .expect("create");
-    let expected = transcript_revision(&session.messages).expect("empty revision");
-    let messages = vec![user_text("hello")];
-
-    let committed = store
-        .compare_and_swap_messages(&session.metadata.id, &expected, messages.clone())
-        .expect("CAS commit");
-
-    assert_eq!(committed, transcript_revision(&messages).expect("revision"));
-    assert_eq!(
-        store.load(&session.metadata.id).expect("load").messages,
-        messages
-    );
-}
-
-#[test]
 fn forkguard_runtime_snapshot_load_does_not_repair_in_flight_tool_call() {
     let (store, _guard) = isolated_store();
     let session = store
@@ -1372,9 +1342,15 @@ fn transcript_cas_rejects_stale_revision_without_overwrite() {
         .expect("create");
     let stale = transcript_revision(&session.messages).expect("empty revision");
     let winner = vec![user_text("winner")];
-    store
+    // first commit 成功并返回新 revision、落盘生效
+    // (原 transcript_cas_commits_and_returns_content_revision 的断言)。
+    let committed = store
         .compare_and_swap_messages(&session.metadata.id, &stale, winner.clone())
         .expect("first commit");
+    assert_eq!(
+        committed,
+        transcript_revision(&winner).expect("winner revision")
+    );
 
     let error = store
         .compare_and_swap_messages(
@@ -1477,18 +1453,16 @@ fn delete_removes_session() {
 }
 
 #[test]
-fn active_id_tracks_set_active() {
+fn delete_active_clears_active_id() {
     let (store, _g) = isolated_store();
+    // set_active/active_id 追踪语义(原 active_id_tracks_set_active 的断言):
+    // 初始 None → set Some 后可读回 → set None 复位。
     assert!(store.active_id().is_none());
     store.set_active(Some("abc".into()));
     assert_eq!(store.active_id().as_deref(), Some("abc"));
     store.set_active(None);
     assert!(store.active_id().is_none());
-}
 
-#[test]
-fn delete_active_clears_active_id() {
-    let (store, _g) = isolated_store();
     let s = store
         .create_new("/model".into(), None, std::env::temp_dir())
         .expect("create");
@@ -1646,34 +1620,6 @@ fn generate_session_id_url_safe() {
 }
 
 #[test]
-fn pinvou_review_defaults_off() {
-    let (store, _g) = isolated_store();
-    assert!(!store.mode_state("s1").pinvou_review_enabled);
-}
-
-#[test]
-fn set_pinvou_review_persists() {
-    let (store, _g) = isolated_store();
-    store.set_pinvou_review("s1", true);
-    assert!(store.mode_state("s1").pinvou_review_enabled);
-    store.set_pinvou_review("s1", false);
-    assert!(!store.mode_state("s1").pinvou_review_enabled);
-}
-
-#[test]
-fn set_mode_preserves_pinvou_review() {
-    // 关键不变量:切 mode(set_mode)不能覆盖品悟开关。
-    let (store, _g) = isolated_store();
-    store.set_pinvou_review("s1", true);
-    store
-        .set_mode("s1", SerializableMode::Yolo)
-        .expect("set chat mode");
-    let state = store.mode_state("s1");
-    assert!(state.pinvou_review_enabled);
-    assert!(matches!(state.mode, SerializableMode::Yolo));
-}
-
-#[test]
 fn pending_plan_ticket_is_compare_and_consumed_with_failure_restore() {
     let (store, _g) = isolated_store();
     let sid = "plan-ticket-session";
@@ -1723,10 +1669,9 @@ fn pending_plan_ticket_is_compare_and_consumed_with_failure_restore() {
 
 /// 模式切换闭环(回归底座二态后的核心契约):流转命令 set_plan_mode_next(→Plan) /
 /// accept_plan / exit_plan_to_yolo(→Yolo) 实质都只调 set_mode,全程**只动 mode**——
-/// 品悟开关 / 挂载知识集 / 人格卡等正交状态必须原样保留。
+/// 待注入人格 body / 挂载知识集 / 人格卡等正交状态必须原样保留。
 /// (discard_plan「算了」不在此列:放弃方案但留在当前 mode,不调 set_mode。)
 /// 防有人给流转命令加副作用,或把 set_mode 改成整体覆盖式写法时连带清掉这些字段。
-/// 比 set_mode_preserves_pinvou_review 更全(多步往返 + 三字段)。
 #[test]
 fn mode_switch_loop_preserves_orthogonal_state() {
     use SerializableMode;
@@ -1735,7 +1680,7 @@ fn mode_switch_loop_preserves_orthogonal_state() {
 
     // 起始默认 Yolo,挂满正交状态
     assert_eq!(store.mode_state(sid).mode, SerializableMode::Yolo);
-    store.set_pinvou_review(sid, true);
+    store.set_pending_persona_body(sid, Some("PENDING BODY".into()));
     store.set_mounted_collection(sid, Some(42));
     store.set_active_persona(sid, Some("expert-x".into()));
 
@@ -1753,7 +1698,11 @@ fn mode_switch_loop_preserves_orthogonal_state() {
 
     // 三个正交字段全保留
     let st = store.mode_state(sid);
-    assert!(st.pinvou_review_enabled, "切 mode 清了品悟开关");
+    assert_eq!(
+        st.pending_persona_body.as_deref(),
+        Some("PENDING BODY"),
+        "切 mode 清了待注入人格 body"
+    );
     assert_eq!(st.mounted_collection, Some(42), "切 mode 卸载了知识集");
     assert_eq!(
         st.active_persona.as_deref(),
@@ -1771,17 +1720,17 @@ fn pending_turn_injections_restore_on_drop_and_commit_only_after_submission() {
     {
         let pending = store.take_pending_turn_injections("s1");
         assert_eq!(pending.persona_body(), Some("PERSONA BODY"));
-        assert!(store.take_pending_persona_body("s1").is_none());
+        assert!(store.mode_state("s1").pending_persona_body.is_none());
         // Simulate attachment/build/Engine submission failure.
     }
     assert_eq!(
-        store.take_pending_persona_body("s1").as_deref(),
+        store.mode_state("s1").pending_persona_body.as_deref(),
         Some("PERSONA BODY")
     );
 
     store.set_pending_persona_body("s1", Some("SECOND PERSONA".into()));
     store.take_pending_turn_injections("s1").commit();
-    assert!(store.take_pending_persona_body("s1").is_none());
+    assert!(store.mode_state("s1").pending_persona_body.is_none());
 }
 
 #[test]
@@ -1832,6 +1781,82 @@ fn mounted_collections_are_ordered_deduplicated_and_legacy_compatible() {
             collection_id: 42,
             enabled: true,
         }]
+    );
+}
+
+#[test]
+fn remote_and_local_collections_can_be_mounted_together() {
+    let (store, _g) = isolated_store();
+    let sid = "s-mixed-kb";
+    store.set_mounted_collection(sid, Some(7));
+    store.add_mounted_remote_collection(sid, "cube".to_string(), 7);
+    store.add_mounted_remote_collection(sid, "cube".to_string(), 7);
+    store.add_mounted_remote_collection(sid, "other".to_string(), 7);
+    assert_eq!(store.mounted_collection_ids(sid), vec![7]);
+    assert_eq!(
+        store.mounted_remote_collections(sid),
+        vec![
+            MountedRemoteCollection {
+                server_id: "cube".to_string(),
+                collection_id: 7,
+                enabled: true,
+            },
+            MountedRemoteCollection {
+                server_id: "other".to_string(),
+                collection_id: 7,
+                enabled: true,
+            },
+        ]
+    );
+    store.set_mounted_remote_collection_enabled(sid, "cube", 7, false);
+    assert!(!store.mounted_remote_collections(sid)[0].enabled);
+    let changed = store.remove_remote_server_mounts("cube");
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].0, sid);
+    assert_eq!(store.mounted_remote_collections(sid).len(), 1);
+}
+
+#[test]
+fn disconnecting_remote_server_removes_its_mounts_from_every_affected_session() {
+    let (store, _g) = isolated_store();
+    store.set_mounted_collection("session-a", Some(7));
+    store.add_mounted_remote_collection("session-a", "cube".to_string(), 7);
+    store.add_mounted_remote_collection("session-a", "cube".to_string(), 8);
+    store.add_mounted_remote_collection("session-a", "other".to_string(), 7);
+    store.add_mounted_remote_collection("session-b", "cube".to_string(), 9);
+    store.add_mounted_remote_collection("session-unaffected", "other".to_string(), 10);
+
+    let changed = store.remove_remote_server_mounts("cube");
+
+    assert_eq!(
+        changed
+            .iter()
+            .map(|(session_id, _)| session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-a", "session-b"]
+    );
+    assert_eq!(
+        changed[0].1,
+        vec![MountedRemoteCollection {
+            server_id: "other".to_string(),
+            collection_id: 7,
+            enabled: true,
+        }],
+        "events must receive the authoritative post-disconnect mount list"
+    );
+    assert!(store.mounted_remote_collections("session-b").is_empty());
+    assert_eq!(
+        store.mounted_remote_collections("session-unaffected"),
+        vec![MountedRemoteCollection {
+            server_id: "other".to_string(),
+            collection_id: 10,
+            enabled: true,
+        }]
+    );
+    assert_eq!(
+        store.mounted_collection("session-a"),
+        Some(7),
+        "disconnecting a remote server must not disturb local mounts"
     );
 }
 
@@ -1939,6 +1964,57 @@ fn deleting_collection_removes_mount_from_every_affected_session() {
             .revision,
         unaffected_revision,
         "unaffected sessions must not receive a spurious revision"
+    );
+}
+
+#[test]
+fn deleting_remote_collection_removes_only_the_exact_mount_from_every_session() {
+    let (store, _g) = isolated_store();
+    store.set_mounted_collection("session-a", Some(7));
+    store.add_mounted_remote_collection("session-a", "cube".to_string(), 7);
+    store.add_mounted_remote_collection("session-a", "cube".to_string(), 8);
+    store.add_mounted_remote_collection("session-a", "other".to_string(), 7);
+    store.add_mounted_remote_collection("session-b", "cube".to_string(), 7);
+    store.set_mounted_remote_collection_enabled("session-b", "cube", 7, false);
+    store.add_mounted_remote_collection("session-unaffected", "cube".to_string(), 9);
+
+    let changed = store.remove_mounted_remote_collection_from_all("cube", 7);
+
+    assert_eq!(
+        changed
+            .iter()
+            .map(|(session_id, _)| session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session-a", "session-b"]
+    );
+    assert_eq!(
+        store.mounted_remote_collections("session-a"),
+        vec![
+            MountedRemoteCollection {
+                server_id: "cube".to_string(),
+                collection_id: 8,
+                enabled: true,
+            },
+            MountedRemoteCollection {
+                server_id: "other".to_string(),
+                collection_id: 7,
+                enabled: true,
+            },
+        ]
+    );
+    assert!(store.mounted_remote_collections("session-b").is_empty());
+    assert_eq!(
+        store.mounted_remote_collections("session-unaffected"),
+        vec![MountedRemoteCollection {
+            server_id: "cube".to_string(),
+            collection_id: 9,
+            enabled: true,
+        }]
+    );
+    assert_eq!(
+        store.mounted_collection("session-a"),
+        Some(7),
+        "remote deletion must not disturb local mounts with the same numeric id"
     );
 }
 
